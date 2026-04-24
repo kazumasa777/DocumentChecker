@@ -132,32 +132,7 @@ MM_PER_INCH = 25.4
 EMUS_PER_INCH = 914400
 EMU_PER_MM = EMUS_PER_INCH / MM_PER_INCH
 COMMON_MARGIN_RULE_TEXT = "余白（A4縦:上20/下20/左30/右20mm以上）"
-RULE_TYPO = "誤字脱字がないか？資料全体において誤字脱字がないか確認する。あった場合は具体的な場所と該当箇所を明示する。"
-RULE_STYLE_UNIFY = "書式、大字の有無、セル結合の使用箇所、文字そろえが全体で統一されており、資料全体の視認性に違和感がないか確認する。"
-RULE_CUSTOMER_SAMA = "資料中の全ての顧客名称（例：国交省、税機構）に「様」が付けられ、統一されているか確認する。"
-RULE_PERIOD_UNIFY = "文末に「。」の有無が資料全体で統一されているか確認する。"
-RULE_FONT_UNIFY = "提出資料全体のフォントが「MS Pゴシック」で統一されており、資料内で他のフォントが使用されていないか確認する。"
-RULE_MEETING_WORDS = "資料内に「全体会議」「個別会議」という文言が残っておらず、資料の文脈で必要ない会議名称が記載されていないか確認する。"
-RULE_VENDOR_TERM = "資料内に「工程管理支援事業者」の誤記が存在せず、正しく「工程管理等支援事業者」が使用されているかを確認する。表記が統一されているかチェックする。"
-RULE_PROJECT_NAME = "プロジェクト名の表記が一致しているか確認する。特に、M6の「自動車登録検査関係システム」に誤った記載がないかをチェックし、正しく「自動車登録検査業務電子情報処理システム」の表記になっているか確認する。"
-RULE_BOKEI_SYSTEM = "冒頭定義がある場合、「本システム」という記載になっているか確認する。"
-RULE_FIG_TABLE_SEQ = "同じ資料内で図の番号や表の番号の整合はとれているか確認する。"
-RULE_BLUE_RGB = "青字を使用している箇所において、明確に原色の青色が使用されているかを確認する。"
-RULE_FILE_TITLE_EMPTY = "ファイルプロパティの「タイトル」が空白になっているか。"
 
-
-# --- ユーザー指定で出力除外したいcheck_id ---
-# ここに記載したCheckIDは、結果出力・対応推奨設定から除外する。
-USER_EXCLUDED_CHECK_IDS: Set[str] = {
-    "DE01",
-    "DE03",
-    "K01XY",
-    "K01WBS",
-    "K01NAME",
-    "L1",
-    "G02",
-    "G04",
-}
 
 EXCLUDED_CHECK_IDS: Set[str] = {
     "C2",
@@ -179,40 +154,12 @@ EXCLUDED_CHECK_IDS: Set[str] = {
     "DW05",
 }
 
-# チェックIDだけでは取り切れない、不要なチェック項目文言を除外する。
-EXCLUDED_KEYWORDS: Set[str] = {
-    RULE_TYPO,
-    RULE_STYLE_UNIFY,
-    RULE_CUSTOMER_SAMA,
-    RULE_PERIOD_UNIFY,
-    RULE_FONT_UNIFY,
-    RULE_MEETING_WORDS,
-    RULE_VENDOR_TERM,
-    RULE_PROJECT_NAME,
-    RULE_BOKEI_SYSTEM,
-    RULE_FIG_TABLE_SEQ,
-    RULE_BLUE_RGB,
-    RULE_FILE_TITLE_EMPTY,
-    "誤字脱字がないか",
-    "書式、大字の有無",
-    "顧客名称",
-    "文末に「。」",
-    "MS Pゴシック",
-    "全体会議",
-    "個別会議",
-    "工程管理支援事業者",
-    "工程管理等支援事業者",
-    "プロジェクト名の表記",
-    "本システム",
-    "図の番号や表の番号",
-    "原色の青色",
-    "ファイルプロパティの「タイトル」",
-}
+# 不要チェックは生成元で削除済み。文言ベース除外は使用しない。
+EXCLUDED_KEYWORDS: Set[str] = set()
 
 EXCLUDED_CHECK_ITEMS_NORMALIZED: Set[str] = {
     "ppt画像化",
     "印刷範囲外記載チェック[課題管理表]",
-    *{re.sub(r"\s+", "", s.strip().lower()) for s in EXCLUDED_KEYWORDS},
 }
 
 
@@ -227,9 +174,6 @@ def normalize_check_item_key(check_item: object) -> str:
 
 def is_excluded_check(check_id: object = "", check_item: object = "") -> bool:
     cid = str(check_id or "").strip().upper()
-
-    if cid in USER_EXCLUDED_CHECK_IDS:
-        return True
 
     if cid in EXCLUDED_CHECK_IDS:
         return True
@@ -295,7 +239,6 @@ TYPE_SPECIFIC_CHECK_ITEMS = {
     "Excel": [],
     "Word": [],
     "PDF": [],
-    "LegacyOffice": [("L1", "旧形式ファイル")],
     # PPT画像化は除外
 }
 
@@ -1380,7 +1323,7 @@ def run_visual_pipeline(
                     add_result(results, file_path, "CommonVisual", "VISO", "VISIO→PNG変換", "ERROR", detail, "ファイルや環境を確認してください。")
                     return None
                 for idx, image_path in enumerate(sorted(png_files), 1):
-                    visual_pages.append(VisualPage(str(file_path), idx, str(image_path), sheet_name=None))
+                    visual_pages.append(VisualPage(unified_file_path, idx, str(image_path), sheet_name=None))
                 detail = f"{len(png_files)}ページをPNG化(LibreOffice)。"
                 if image_err:
                     detail = f"Aspose/COMは利用不可のため {detail}"
@@ -1495,6 +1438,22 @@ def display_file_path_for_log(file_path: str) -> str:
         return p.name
 
 
+def normalize_preview_file_name(file_path: object) -> str:
+    """image_previewシート表示用のファイル名をResultsと同じ方針で正規化する。"""
+    p = Path(str(file_path))
+    ext = p.suffix.lower()
+    if ext in {'.ppt', '.pptx'}:
+        return p.with_suffix('.ppt').name
+    if ext in {'.vsd', '.vsdx'}:
+        return p.with_suffix('.vsd').name
+    if ext == '.pdf':
+        parent_parts = {part.lower() for part in p.parts}
+        stem_lower = p.stem.lower()
+        if 'pdf' in parent_parts and ('vsd' in stem_lower or 'visio' in stem_lower):
+            return p.with_suffix('.vsd').name
+    return p.name
+
+
 def populate_image_preview_sheet(ws_images, visual_pages: Iterable[VisualPage], preview_pages_per_row: int = 6) -> None:
 
     ws_images.append(["file_name", "page_count", "image_labels..."])
@@ -1531,25 +1490,10 @@ def populate_image_preview_sheet(ws_images, visual_pages: Iterable[VisualPage], 
     FILE_ROW_GAP = 3  # ファイル間の空白行数
     IMAGE_COL_GAP = 1  # 画像間の空白列数
 
-    # resultsで使われているVSDファイル名一覧を作成
-    vsd_names = set()
-    for f in pages_by_file:
-        p = Path(f)
-        if p.suffix.lower() in {'.vsd', '.vsdx'}:
-            vsd_names.add(p.with_suffix('.vsd').name)
-
     for file_idx, (file_path, pages) in enumerate(sorted(pages_by_file.items())):
-        # PPT/PPTX/VSD/VSDXは拡張子を統一して表示
-        p = Path(file_path)
-        ext = p.suffix.lower()
-        if ext in {'.ppt', '.pptx'}:
-            display_name = p.with_suffix('.ppt').name
-        elif ext in {'.vsd', '.vsdx'}:
-            display_name = p.with_suffix('.vsd').name
-        elif ext == '.pdf' and p.with_suffix('.vsd').name in vsd_names:
-            display_name = p.with_suffix('.vsd').name
-        else:
-            display_name = p.name
+        # PPT/PPTX/VSD/VSDXはResultsと同じ表示名に統一する。
+        # 特にVSDは、VSD→PDF→PNGの中間PDF名が出ないように.vsd表示へ正規化する。
+        display_name = normalize_preview_file_name(file_path)
 
         # 画像情報を準備
         img_objs = []
@@ -2392,32 +2336,10 @@ def check_visio(file_path: Path, results: List[CheckResult], cover_keyword: Opti
     )
     add_result(results, file_path, "VISIO", "V6", "参照エラー残存", "FAIL" if ref_error_pages else "PASS", (f"参照エラー文字列を検出。 / {summarize_pages(ref_error_pages)}" if ref_error_pages else "参照エラー文字列なし。 / 指摘対象ページ：なし"), "参照元を修正してください。" if ref_error_pages else "対応不要。")
 
-    maybe_add_or_replace_result(
-        results,
-        file_path,
-        "DV01",
-        "VISIO",
-        "VISIO: ハイパーリンク付き図形が残っていないか確認する。",
-        "WARN" if hyperlink_pages else "PASS",
-        (f"ハイパーリンク付き図形を検出。 / {summarize_pages(hyperlink_pages)}" if hyperlink_pages else "ハイパーリンク付き図形は検出されません。 / 指摘対象ページ：なし"),
-        "不要なハイパーリンクを確認してください。" if hyperlink_pages else "対応不要。",
-    )
 
     custom_prop_summaries = summarize_visio_custom_props(custom_props) if custom_props is not None else []
-    maybe_add_or_replace_result(
-        results,
-        file_path,
-        "DV02",
-        "VISIO",
-        "VISIO: カスタムプロパティが残っていないか確認する。",
-        "WARN" if custom_prop_summaries else "PASS",
-        (f"カスタムプロパティを検出。 / {', '.join(custom_prop_summaries[:5])}" + (f" ほか{len(custom_prop_summaries) - 5}件" if len(custom_prop_summaries) > 5 else "") if custom_prop_summaries else "カスタムプロパティは検出されません。"),
-        "不要なカスタムプロパティを削除してください。" if custom_prop_summaries else "対応不要。",
-    )
 
     title_text = str(getattr(props, "title", "") or "").strip() if props is not None else ""
-    if not is_excluded_check("G19", f"共通: {RULE_FILE_TITLE_EMPTY}"):
-        add_result(results, file_path, "VISIO", "G19", f"共通: {RULE_FILE_TITLE_EMPTY}", "PASS" if not title_text else "FAIL", ("タイトルは空白です。" if not title_text else "ファイルタイトルが設定されています。"), "タイトルを空白にしてください。" if title_text else "対応不要。")
     run_language_consistency_checks(results, file_path, "VISIO", text_pages)
     run_common_textual_auto_checks(results, file_path, "VISIO", text_pages)
     run_date_consistency_check(results, file_path, "VISIO", text_pages)
@@ -2648,18 +2570,6 @@ def color_is_blue_excel(cell) -> bool:
     return False
 
 
-def maybe_add_or_replace_result(results: List[CheckResult], file_path: Path, check_id: str, file_type: str, check_item: str, status: str, detail: str, action: str) -> None:
-    target = str(file_path)
-    if is_excluded_check(check_id, check_item):
-        results[:] = [r for r in results if not (r.file_path == target and r.check_id == check_id)]
-        return
-    for i, r in enumerate(results):
-        if r.file_path == target and r.check_id == check_id:
-            results[i] = CheckResult(target, file_type, check_id, check_item, status, detail, action)
-            return
-    add_result(results, file_path, file_type, check_id, check_item, status, detail, action)
-
-
 def scan_excel_font_and_blue_and_domains(file_path: Path, wb, results: List[CheckResult], text_pages: List[Tuple[str, str]]) -> None:
     domains = detect_domains(file_path)
     non_mp_pages: List[str] = []
@@ -2684,9 +2594,8 @@ def scan_excel_font_and_blue_and_domains(file_path: Path, wb, results: List[Chec
                     header_map[normalize_text(v)] = c
         except Exception:
             header_map = {}
-
-        skip_font_check = is_excluded_check("G09", f"共通: {RULE_FONT_UNIFY}")
-        skip_blue_check = is_excluded_check("G17", f"共通: {RULE_BLUE_RGB}")
+        skip_font_check = True
+        skip_blue_check = True
 
         for row_idx, col_idx, cell in iter_nonempty_cells(ws):
             page_label = infer_excel_print_page_from_breaks(row_break_ids, col_break_ids, row_idx, col_idx)
@@ -2748,55 +2657,6 @@ def scan_excel_font_and_blue_and_domains(file_path: Path, wb, results: List[Chec
                     wbs_seq_all.append(int(m.group(1)))
                     wbs_seq_pages.append(infer_excel_print_page_from_breaks(row_break_ids, col_break_ids, row_idx, col_idx))
 
-    maybe_add_or_replace_result(
-        results, file_path, "G09", "Excel", f"共通: {RULE_FONT_UNIFY}",
-        "FAIL" if non_mp_pages else "PASS",
-        (f"MS Pゴシック以外のフォント候補を検出。 / {summarize_pages(non_mp_pages)}" if non_mp_pages else "フォントはMS Pゴシックで概ね統一されています。 / 指摘対象ページ：なし"),
-        "フォントをMS Pゴシックへ統一してください。" if non_mp_pages else "対応不要。"
-    )
-    maybe_add_or_replace_result(
-        results, file_path, "G17", "Excel", f"共通: {RULE_BLUE_RGB}",
-        "FAIL" if blue_ng_pages else "PASS",
-        (f"原色青以外の青字候補を検出。 / {summarize_pages(blue_ng_pages)}" if blue_ng_pages else "青字は原色青として検出されるか、青字自体がありません。 / 指摘対象ページ：なし"),
-        "青字色コードを見直してください。" if blue_ng_pages else "対応不要。"
-    )
-    maybe_add_or_replace_result(
-        results, file_path, "DE01", "Excel", "Excel: 非表示されている内部ワークシートがあるか確認する。",
-        "FAIL" if hidden_sheets else "PASS",
-        (f"非表示シートを検出: {', '.join(hidden_sheets[:10])}" if hidden_sheets else "非表示シートは検出されません。"),
-        "不要なら表示または削除してください。" if hidden_sheets else "対応不要。"
-    )
-    maybe_add_or_replace_result(
-        results, file_path, "DE03", "Excel", "Excel: ファイル共有設定が解除されているか確認する。",
-        "FAIL" if share_flag else "PASS",
-        ("共有設定の可能性あり。" if share_flag else "共有設定の明確な痕跡は検出されません。"),
-        "共有設定を確認し解除してください。" if share_flag else "対応不要。"
-    )
-
-    if "月間会議計画" in domains:
-        maybe_add_or_replace_result(
-            results, file_path, "K01NAME", "Excel", "月間会議計画: 説明者欄は名前で記載されているか確認する。",
-            "FAIL" if speaker_ng_pages else "PASS",
-            (f"人名以外の説明者候補を検出。 / {summarize_pages(speaker_ng_pages)}" if speaker_ng_pages else "説明者欄は人名らしい記載です。 / 指摘対象ページ：なし"),
-            "説明者欄を人名表記へ修正してください。" if speaker_ng_pages else "対応不要。"
-        )
-
-    if "進捗報告資料（本紙）" in domains:
-        maybe_add_or_replace_result(
-            results, file_path, "K01XY", "Excel", "進捗報告資料（本紙）: 進捗状況報告の宿題事項表における未完了列の記載形式が「X(Y)」形式であることを確認する。",
-            "FAIL" if x_y_ng_pages else "PASS",
-            (f"X(Y)形式でない候補を検出。 / {summarize_pages(x_y_ng_pages)}" if x_y_ng_pages else "未完了列はX(Y)形式で記載されています。 / 指摘対象ページ：なし"),
-            "未完了列をX(Y)形式へ修正してください。" if x_y_ng_pages else "対応不要。"
-        )
-
-    if "WBS/マスタースケジュール" in domains or "進捗報告資料（本紙）" in domains:
-        missing = get_missing_sequence(wbs_seq_all)
-        maybe_add_or_replace_result(
-            results, file_path, "K01WBS", "Excel", "WBS/マスタースケジュール: WBS番号が連番で欠番がないか確認する。",
-            "FAIL" if missing else ("PASS" if wbs_seq_all else "WARN"),
-            (f"WBS欠番={missing[:10]} / {summarize_pages(wbs_seq_pages)}" if missing else ("WBS番号に明確な欠番は検出されません。 / 指摘対象ページ：なし" if wbs_seq_all else "WBS連番を自動抽出できませんでした。 / 指摘対象ページ：目検で確認")),
-            "WBS番号の欠番・重複を確認してください。" if (missing or not wbs_seq_all) else "対応不要。"
-        )
 
 
 def scan_word_font_blue_blank_domains(file_path: Path, doc, results: List[CheckResult], text_pages: List[Tuple[str, str]]) -> None:
@@ -2973,8 +2833,6 @@ def check_excel(file_path: Path, results: List[CheckResult]) -> None:
     add_result(results, file_path, "Excel", "C3", COMMON_MARGIN_RULE_TEXT, status, detail, action)
     add_result(results, file_path, "Excel", "C4", "ページ番号", "MANUAL", "ヘッダ/フッタのページ番号整合は目検。 / 指摘対象ページ：目検で確認", "ページ番号連番を確認。")
     add_result(results, file_path, "Excel", "C5", "PDF出力結果確認（見切れ/罫線/表サイズ/ページ番号）", "MANUAL", "別シートPNGで目検。 / 指摘対象ページ：目検で確認", "罫線切れ・表不完全・ページ数を確認。")
-    if not is_excluded_check("G19", f"共通: {RULE_FILE_TITLE_EMPTY}"):
-        add_result(results, file_path, "Excel", "G19", f"共通: {RULE_FILE_TITLE_EMPTY}", "PASS" if not (cp.title or "").strip() else "FAIL", ("タイトルは空白です。" if not (cp.title or "").strip() else "ファイルタイトルが設定されています。"), "タイトルを空白にしてください。" if (cp.title or "").strip() else "対応不要。")
     run_language_consistency_checks(results, file_path, "Excel", text_pages)
     run_common_textual_auto_checks(results, file_path, "Excel", text_pages)
     run_date_consistency_check(results, file_path, "Excel", text_pages)
@@ -3106,7 +2964,6 @@ def check_word(file_path: Path, results: List[CheckResult], cover_keyword: Optio
     has_page_number_field = ("PAGE" in header_footer_xml) or ("w:pgNum" in header_footer_xml)
     add_result(results, file_path, "Word", "C4", "ページ番号", "PASS" if has_page_number_field else "WARN", ("ページ番号フィールドを検出。 / 指摘対象ページ：全体" if has_page_number_field else "ページ番号フィールド未検出。 / 指摘対象ページ：目検で確認"), "ヘッダ/フッタにページ番号設定。" if not has_page_number_field else "対応不要。")
     add_result(results, file_path, "Word", "C5", "PDF出力結果確認（見切れ/罫線/表サイズ/ページ番号）", "MANUAL", "別シートPNGで目検。 / 指摘対象ページ：目検で確認", "罫線切れ・表不完全・ページ数を確認。")
-    add_result(results, file_path, "Word", "G19", f"共通: {RULE_FILE_TITLE_EMPTY}", "PASS" if not (cp.title or "").strip() else "FAIL", ("タイトルは空白です。" if not (cp.title or "").strip() else "ファイルタイトルが設定されています。"), "タイトルを空白にしてください。" if (cp.title or "").strip() else "対応不要。")
 
     text_pages = extract_word_text_pages(doc, file_path)
     run_language_consistency_checks(results, file_path, "Word", text_pages)
@@ -3211,9 +3068,6 @@ def check_pdf(file_path: Path, results: List[CheckResult], cover_keyword: Option
     page_count = len(reader.pages)
     add_result(results, file_path, "PDF", "C4", "ページ番号", "MANUAL", f"ページ数: {page_count}。 / 指摘対象ページ：目検で確認", "連番整合を目視確認。")
     add_result(results, file_path, "PDF", "C5", "PDF出力結果確認（見切れ/罫線/表サイズ/ページ番号）", "MANUAL", "別シートPNGで目検。 / 指摘対象ページ：目検で確認", "罫線切れ・表不完全・ページ数を確認。")
-    add_result(results, file_path, "PDF", "G09", f"共通: {RULE_FONT_UNIFY}", "MANUAL", "PDFからフォント名の安定抽出は未対応。 / 指摘対象ページ：目検で確認", "必要に応じて元ファイルで確認してください。")
-    add_result(results, file_path, "PDF", "G17", f"共通: {RULE_BLUE_RGB}", "MANUAL", "PDFから色コードの安定抽出は未対応。 / 指摘対象ページ：目検で確認", "必要に応じて元ファイルで確認してください。")
-    add_result(results, file_path, "PDF", "G19", f"共通: {RULE_FILE_TITLE_EMPTY}", "PASS" if not str(metadata.get('/Title') or '').strip() else "FAIL", ("タイトルは空白です。" if not str(metadata.get('/Title') or '').strip() else "ファイルタイトルが設定されています。"), "タイトルを空白にしてください。" if str(metadata.get('/Title') or '').strip() else "対応不要。")
     run_language_consistency_checks(results, file_path, "PDF", text_pages)
     run_common_textual_auto_checks(results, file_path, "PDF", text_pages)
     run_date_consistency_check(results, file_path, "PDF", text_pages)
@@ -3236,7 +3090,6 @@ def check_file(file_path: Path, results: List[CheckResult], cover_keyword: Optio
         check_ppt(file_path, results, cover_keyword)
     elif suffix in {".xls", ".doc"}:
         file_type = "LegacyOffice"
-        add_result(results, file_path, "LegacyOffice", "L1", "旧形式ファイル", "WARN", "旧形式(.xls/.doc)は詳細解析対象外。 / 指摘対象ページ：変換後に確認", "可能なら .xlsx/.docx へ変換。")
 
     if file_type:
         ensure_expected_checks(results, file_path, file_type)
@@ -3398,26 +3251,12 @@ def run_cross_file_consistency_checks(target_files: List[Path], results: List[Ch
         if extra_body:
             status = "WARN" if status == "PASS" else status
             details.append(f"ファイル名と本文の別紙番号不一致候補={extra_body[:10]}")
-        maybe_add_or_replace_result(
-            results, main_fp, "G02", "Excel" if main_fp.suffix.lower() in {'.xlsx', '.xlsm', '.xls'} else ("Word" if main_fp.suffix.lower() in {'.doc', '.docx'} else "PDF"),
-            "共通: 本紙（進捗状況報告）に記載されている別紙番号が、対応する別紙ファイル名と別紙内の本文に記載された番号と完全に一致しているか確認する。",
-            status,
-            (" / ".join(details) if details else "本紙・別紙ファイル名・別紙本文の別紙番号は整合しています。"),
-            "不足または不一致の別紙番号を修正してください。" if status in {"FAIL", "WARN"} else "対応不要。"
-        )
 
     for af in annex_files:
         info = file_info[str(af)]
         body_nums = set(info["annex_nums"])
         name_nums = parse_annex_numbers(af.stem)
         status = "PASS" if body_nums == name_nums else ("FAIL" if name_nums or body_nums else "WARN")
-        maybe_add_or_replace_result(
-            results, af, "G03", "Excel" if af.suffix.lower() in {'.xlsx', '.xlsm', '.xls'} else ("Word" if af.suffix.lower() in {'.doc', '.docx'} else "PDF"),
-            "共通: 別紙ファイルのファイル名に記載されている別紙番号と別紙内の本文に記載されている別紙番号が一致しているか確認する。文法や表現を統一する。",
-            status,
-            (f"ファイル名={sorted(name_nums)} / 本文={sorted(body_nums)}" if (name_nums or body_nums) else "別紙番号を抽出できませんでした。"),
-            "ファイル名と本文の別紙番号を一致させてください。" if status != "PASS" else "対応不要。"
-        )
 
     evm_wbs_union: Set[str] = set()
     for ef in evm_files:
@@ -3435,13 +3274,6 @@ def run_cross_file_consistency_checks(target_files: List[Path], results: List[Ch
         if extra:
             status = "WARN" if status == "PASS" else status
             details.append(f"EVMにあり本紙になし={extra[:12]}")
-        maybe_add_or_replace_result(
-            results, main_fp, "G04", "Excel" if main_fp.suffix.lower() in {'.xlsx', '.xlsm', '.xls'} else ("Word" if main_fp.suffix.lower() in {'.doc', '.docx'} else "PDF"),
-            "共通: 本紙（進捗状況報告）に記載されたWBS番号がEVMファイル内のタスク状態（開始、進行中、完了）と一致しており、不整合や漏れがないか確認する。",
-            status,
-            (" / ".join(details) if details else "本紙とEVMのWBS番号集合に明確な不整合は検出されません。"),
-            "本紙とEVMのWBS番号対応を見直してください。" if status in {"FAIL", "WARN"} else "対応不要。"
-        )
 
 
 def main(
