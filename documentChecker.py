@@ -102,7 +102,9 @@ def normalize_check_item_key(check_item: object) -> str:
 
 
 def is_excluded_check(check_id: object = "", check_item: object = "") -> bool:
-    """Compatibility hook. Unwanted checks are removed at their generation source."""
+    # C3（余白チェック）は完全除外
+    if str(check_id).strip().upper() == "C3":
+        return True
     return False
 
 
@@ -3633,6 +3635,7 @@ def check_word(file_path: Path, results: List[CheckResult], cover_keyword: Optio
         else:
             margin_fail_msgs.append(full_msg)
 
+
     add_result(
         results,
         file_path,
@@ -3644,20 +3647,22 @@ def check_word(file_path: Path, results: List[CheckResult], cover_keyword: Optio
         "ページ設定で余白を補正。" if margin_fail_msgs else "対応不要。",
     )
 
+    # ページ番号フィールド検出ロジックを追加
+    try:
+        header_footer_xml = "\n".join(sec.header._element.xml + sec.footer._element.xml for sec in doc.sections)
+        has_page_number_field = ("PAGE" in header_footer_xml) or ("w:pgNum" in header_footer_xml)
+    except Exception:
+        has_page_number_field = False
+
     add_result(
         results,
         file_path,
         "Word",
         "C4",
-
         "ページ番号",
-
         "PASS" if has_page_number_field else "WARN",
-
         "ページ番号フィールドを検出。" if has_page_number_field else "ページ番号フィールドを検出できません。最大ページ数は画像シート参照。",
-
         "ヘッダ/フッタにページ番号を設定。" if not has_page_number_field else "対応不要。",
-
     )
 
  
@@ -4226,6 +4231,7 @@ def find_target_files(root: Path, exclude_paths: Optional[Set[Path]] = None) -> 
 
 
 def find_other_files(root: Path, exclude_paths: Optional[Set[Path]] = None) -> List[Path]:
+    # チェック対象拡張子（Excel, Word, PDF, PPT, Visio）のみを厳密に除外
     target_suffixes = {".xlsx", ".xlsm", ".xls", ".docx", ".doc", ".pdf", ".ppt", ".pptx", ".vsd", ".vsdx"}
     found: List[Path] = []
     exclude_resolved: Set[Path] = {p.resolve() for p in (exclude_paths or set())}
@@ -4248,9 +4254,10 @@ def find_other_files(root: Path, exclude_paths: Optional[Set[Path]] = None) -> L
                 continue
             if any(parent in exclude_resolved for parent in resolved.parents):
                 continue
-            if path.suffix.lower() in target_suffixes:
-                continue
-            found.append(path)
+            # チェック対象拡張子以外はother_filesに必ず含める
+            if path.suffix.lower() not in target_suffixes:
+                found.append(path)
+            # それ以外（対象拡張子）はスキップ
     return sorted(set(found))
 
 
@@ -4335,6 +4342,54 @@ def main(
     # パフォーマンス改善: ファイルリストを事前に全て取得し、進捗・残数を都度表示
     target_files = list(find_target_files(root, exclude_paths={out_xlsx, assets_root}))
     other_files = list(find_other_files(root, exclude_paths={out_xlsx, assets_root}))
+    # チェック対象外ファイルはresultsから除外
+    target_files = [f for f in target_files if f.suffix.lower() in {".xlsx", ".xlsm", ".xls", ".docx", ".doc", ".pdf", ".ppt", ".pptx", ".vsd", ".vsdx"}]
+    # --- ファイルプロパティ情報取得関数 ---
+    def get_file_property_detail(file_path: Path) -> str:
+        """
+        ファイルのプロパティ情報（タイトル、件名、タグ、分類、作成者、前回保存者、改訂番号、バージョン番号）を取得し、
+        "タイトル=... / 件名=... / ..." の形式で返す。取得できない場合は空欄。
+        """
+        suffix = file_path.suffix.lower()
+        props = {
+            "タイトル": "",
+            "件名": "",
+            "タグ": "",
+            "分類": "",
+            "作成者": "",
+            "前回保存者": "",
+            "改訂番号": "",
+            "バージョン番号": ""
+        }
+        try:
+            if suffix == ".docx" and Document is not None:
+                doc = Document(file_path)
+                core = doc.core_properties
+                props["タイトル"] = getattr(core, "title", "") or ""
+                props["件名"] = getattr(core, "subject", "") or ""
+                props["タグ"] = getattr(core, "keywords", "") or ""
+                props["分類"] = getattr(core, "category", "") or ""
+                props["作成者"] = getattr(core, "author", "") or ""
+                props["前回保存者"] = getattr(core, "last_modified_by", "") or ""
+                props["改訂番号"] = getattr(core, "revision", "") or ""
+                props["バージョン番号"] = getattr(core, "version", "") or ""
+            elif suffix in {".xlsx", ".xlsm", ".xls"} and load_workbook is not None:
+                wb = load_workbook(file_path, read_only=True, data_only=True)
+                core = getattr(wb, "properties", None)
+                if core:
+                    props["タイトル"] = getattr(core, "title", "") or ""
+                    props["件名"] = getattr(core, "subject", "") or ""
+                    props["タグ"] = getattr(core, "keywords", "") or ""
+                    props["分類"] = getattr(core, "category", "") or ""
+                    props["作成者"] = getattr(core, "creator", "") or ""
+                    props["前回保存者"] = getattr(core, "lastModifiedBy", "") or ""
+                    props["改訂番号"] = getattr(core, "revision", "") or ""
+                    props["バージョン番号"] = getattr(core, "version", "") or ""
+                wb.close()
+            # 他形式（pptx, pdf, vsd等）は必要に応じて拡張
+        except Exception:
+            pass
+        return " / ".join([f"{k}={v}" for k, v in props.items()])
     results: List[CheckResult] = []
     visual_pages: List[VisualPage] = []
     visual_enabled = not args.no_visual
