@@ -68,6 +68,88 @@ def _copy_file_preserve_tree(src: Path, dst_root: Path, src_root: Path) -> Path:
 # ------------------------------
 # Visio 前処理
 # ------------------------------
+
+def _runtime_base_dirs() -> List[Path]:
+    """Windows配布向けに、実行ファイル周辺とPyInstaller展開先を探索する。"""
+    dirs: List[Path] = []
+    try:
+        if getattr(sys, "frozen", False):
+            dirs.append(Path(sys.executable).resolve().parent)
+        dirs.append(Path(__file__).resolve().parent)
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            dirs.append(Path(meipass).resolve())
+    except Exception:
+        pass
+
+    unique: List[Path] = []
+    seen = set()
+    for d in dirs:
+        key = str(d).lower()
+        if key not in seen:
+            unique.append(d)
+            seen.add(key)
+    return unique
+
+
+def _add_aspose_plugin_paths() -> List[str]:
+    candidates: List[Path] = []
+    env_dir = os.environ.get("ASPOSE_DIAGRAM_PLUGIN_DIR", "").strip()
+    if env_dir:
+        candidates.append(Path(env_dir))
+
+    for base_dir in _runtime_base_dirs():
+        candidates.extend([
+            base_dir / "plugins" / "aspose_diagram",
+            base_dir / "plugins" / "aspose",
+            base_dir / "plugins",
+            base_dir / "vendor" / "aspose_diagram",
+            base_dir / "vendor" / "aspose",
+            base_dir / "vendor",
+            base_dir / "lib" / "aspose_diagram",
+            base_dir / "lib",
+            base_dir / "_internal" / "plugins" / "aspose_diagram",
+            base_dir / "_internal" / "plugins",
+        ])
+
+    added: List[str] = []
+    for path in candidates:
+        try:
+            if path.exists() and path.is_dir():
+                path_str = str(path.resolve())
+                if path_str not in sys.path:
+                    sys.path.insert(0, path_str)
+                    added.append(path_str)
+        except Exception:
+            continue
+    return added
+
+
+def _ensure_aspose_diagram_available() -> Tuple[bool, str]:
+    """
+    オフラインWindows配布向け。pip自動導入は行わず、plugins配下の
+    Aspose.Diagramプラグインを探索して読み込む。
+    """
+    try:
+        import aspose.diagram  # type: ignore
+        return True, "Aspose.Diagram 利用可能"
+    except Exception as first_exc:
+        added = _add_aspose_plugin_paths()
+        try:
+            import importlib
+            importlib.invalidate_caches()
+            import aspose.diagram  # type: ignore
+            return True, "Aspose.Diagram プラグインを読み込みました。"
+        except Exception as plugin_exc:
+            hint = (
+                "Aspose.Diagram プラグイン未配置または読み込み不可。"
+                "exeと同じフォルダ配下の plugins\\aspose_diagram に aspose パッケージ一式を配置してください。"
+            )
+            if added:
+                hint += f" 探索済み={'; '.join(added[:3])}"
+            return False, f"{hint} import_error={first_exc}; plugin_error={plugin_exc}"
+
+
 def _convert_vsd_to_vsdx(src: Path, dst: Path) -> Optional[str]:
     pythoncom = None
     visio = None
@@ -95,6 +177,9 @@ def _convert_vsd_to_vsdx(src: Path, dst: Path) -> Optional[str]:
                     pass
     except Exception as exc_com:
         try:
+            ok, aspose_msg = _ensure_aspose_diagram_available()
+            if not ok:
+                raise RuntimeError(aspose_msg)
             from aspose.diagram import Diagram, SaveFileFormat
 
             dst.parent.mkdir(parents=True, exist_ok=True)
@@ -117,14 +202,10 @@ def _convert_vsd_to_vsdx(src: Path, dst: Path) -> Optional[str]:
 
 
 def _find_soffice_path() -> Optional[str]:
-    import shutil as _shutil
-
     for candidate in [
         os.environ.get("SOFFICE_PATH", ""),
-        _shutil.which("soffice") or "",
-        _shutil.which("libreoffice") or "",
-        r"C:\\Program Files\\LibreOffice\\program\\soffice.exe",
-        r"C:\\Program Files (x86)\\LibreOffice\\program\\soffice.exe",
+        r"C:\Program Files\LibreOffice\program\soffice.exe",
+        r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
     ]:
         if candidate and os.path.exists(candidate):
             return candidate
@@ -159,6 +240,9 @@ def _convert_visio_to_pdf(src: Path, dst_pdf: Path) -> Optional[str]:
                     pass
     except Exception as exc_com:
         try:
+            ok, aspose_msg = _ensure_aspose_diagram_available()
+            if not ok:
+                raise RuntimeError(aspose_msg)
             from aspose.diagram import Diagram, SaveFileFormat
 
             dst_pdf.parent.mkdir(parents=True, exist_ok=True)
@@ -267,9 +351,6 @@ def stage_folder_pdf_first(
             failure_lines.append(f"WARN  {rel} -> {pdf_err or 'Visio→PDF変換失敗'}")
 
     failure_log_path = None
-    if failure_lines:
-        failure_log_path = root_path / "visio_preprocess_failures.log"
-
     return staged_root, failure_log_path, failure_lines, proxy_map
 
 
@@ -386,11 +467,6 @@ def real_check(
         if visio_files:
             stage_root, failure_log_path, failure_lines, proxy_map = stage_folder_pdf_first(folder, files)
             working_folder = str(stage_root)
-            if failure_lines and failure_log_path is not None:
-                try:
-                    failure_log_path.write_text("\n".join(failure_lines), encoding="utf-8")
-                except Exception:
-                    pass
 
         argv = [working_folder, "-o", out_xlsx, "--visual-assets-dir", visual_assets_dir]
         if action_config_xlsx:
@@ -726,3 +802,4 @@ if __name__ == "__main__":
         auto_close=auto_close,
     )
     app.mainloop()
+
