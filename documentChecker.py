@@ -1,5 +1,38 @@
-# from __future__ import annotations は必ずファイルの最上部に1回だけ記載
+
 from __future__ import annotations
+
+def check_excel_margin(file_path: Path, results: List, wb):
+    margin_required = {"top": 20, "bottom": 20, "left": 30, "right": 20}
+    margin_msgs = []
+    margin_fail = False
+    for ws in wb.worksheets:
+        pm = getattr(ws, "page_margins", None)
+        def to_mm(val):
+            return float(val) * MM_PER_INCH if val is not None else None
+        top = to_mm(getattr(pm, "top", None))
+        bottom = to_mm(getattr(pm, "bottom", None))
+        left = to_mm(getattr(pm, "left", None))
+        right = to_mm(getattr(pm, "right", None))
+        if None in (top, bottom, left, right):
+            margin_msgs.append(f"{ws.title}(余白取得不可)")
+            margin_fail = True
+            continue
+        margin_msgs.append(f"{ws.title}(上{top:.1f}/下{bottom:.1f}/左{left:.1f}/右{right:.1f}mm)")
+        if not (top >= margin_required["top"] and bottom >= margin_required["bottom"] and left >= margin_required["left"] and right >= margin_required["right"]):
+            margin_fail = True
+    detail = "; ".join(margin_msgs) + f" / 基準: 上{margin_required['top']} 下{margin_required['bottom']} 左{margin_required['left']} 右{margin_required['right']}mm"
+    status = "PASS" if not margin_fail else "FAIL"
+    suggested_action = "設定値確認済み。" if status == "PASS" else "ページ設定で余白を補正。"
+    add_result(
+        results,
+        file_path,
+        "Excel",
+        "C3",
+        COMMON_MARGIN_RULE_TEXT,
+        status,
+        detail,
+        suggested_action,
+    )
 
 def check_ppt(file_path: Path, results: List[CheckResult], cover_keyword: Optional[str]) -> None:
     """
@@ -27,8 +60,166 @@ def check_ppt(file_path: Path, results: List[CheckResult], cover_keyword: Option
     props_detail = f"タイトル: {props.title}, 件名: {props.subject}, キーワード: {props.keywords}, 分類: {props.category}, 作成者: {props.author}, 管理者: {props.last_modified_by}, コメント: {props.comments}"
     add_result(results, file_path, "PPT", "C1", "プロパティ情報削除", "FAIL" if has_props else "PASS", props_detail, "不要プロパティを削除。" if has_props else "対応不要。")
 
-    # C3: 余白チェック（PPTは対象外とする例）
-    add_result(results, file_path, "PPT", "C3", COMMON_MARGIN_RULE_TEXT, "N/A", "余白チェックは対象外。", "対応不要。")
+    # C3: 余白チェック（PPTのページ余白を取得して判定）
+    try:
+        # 単位はEMU（914400 = 1インチ）
+        # 1インチ = 25.4mm
+        # 余白基準値（mm）
+        margin_required = {"top": 20, "bottom": 20, "left": 30, "right": 20}
+        # pptxのスライドサイズはページ全体、余白は直接取得できないため、
+        # スライドサイズとページサイズから余白を推定する（標準PPTは余白なしが多い）
+        slide_width = prs.slide_width
+        slide_height = prs.slide_height
+        # 通常A4縦: 210mm x 297mm
+        a4_width_mm = 210
+        a4_height_mm = 297
+        emu_per_mm = EMUS_PER_INCH / MM_PER_INCH
+        a4_width_emu = int(a4_width_mm * emu_per_mm)
+        a4_height_emu = int(a4_height_mm * emu_per_mm)
+        # 余白を計算（A4サイズとの差分を左右上下に分配）
+        margin_left = max((a4_width_emu - slide_width) // 2, 0)
+        margin_right = margin_left
+        margin_top = max((a4_height_emu - slide_height) // 2, 0)
+        margin_bottom = margin_top
+        # mm換算
+        margin_left_mm = round(margin_left / emu_per_mm, 1)
+        margin_right_mm = round(margin_right / emu_per_mm, 1)
+        margin_top_mm = round(margin_top / emu_per_mm, 1)
+        margin_bottom_mm = round(margin_bottom / emu_per_mm, 1)
+        # 判定
+        is_ok = (
+            margin_top_mm >= margin_required["top"] and
+            margin_bottom_mm >= margin_required["bottom"] and
+            margin_left_mm >= margin_required["left"] and
+            margin_right_mm >= margin_required["right"]
+        )
+        detail = (
+            f"スライドサイズ: {round(slide_width / emu_per_mm, 1)}mm x {round(slide_height / emu_per_mm, 1)}mm / "
+            f"A4: {a4_width_mm}mm x {a4_height_mm}mm / "
+            f"余白(上/下/左/右): {margin_top_mm}/{margin_bottom_mm}/{margin_left_mm}/{margin_right_mm}mm / "
+            f"基準: 上{margin_required['top']} 下{margin_required['bottom']} 左{margin_required['left']} 右{margin_required['right']}mm"
+        )
+        status = "PASS" if is_ok else "FAIL"
+        suggested_action = "対応不要。" if is_ok else "スライドサイズをA4基準に合わせて余白を確保してください。"
+        add_result(results, file_path, "PPT", "C3", COMMON_MARGIN_RULE_TEXT, status, detail, suggested_action)
+    except Exception as exc:
+        add_result(results, file_path, "PPT", "C3", COMMON_MARGIN_RULE_TEXT, "ERROR", f"余白判定失敗: {exc}", "目視で確認してください。")
+
+def check_word_margin(file_path: Path, results: List, doc):
+    margin_required = {"top": 20, "bottom": 20, "left": 30, "right": 20}
+    margin_msgs = []
+    margin_fail = False
+
+    def twip_to_mm(val):
+        try:
+            if val is None:
+                return None
+            # python-docxのLength型なら.twipsで取得
+            if hasattr(val, "twips"):
+                v = val.twips
+            else:
+                v = float(val)
+            mm = v * 25.4 / 1440
+            if mm < 0 or mm > 200:
+                return None
+            return mm
+        except Exception:
+            return None
+
+    for idx, section in enumerate(getattr(doc, "sections", []), start=1):
+        top = twip_to_mm(getattr(section, "top_margin", None))
+        bottom = twip_to_mm(getattr(section, "bottom_margin", None))
+        left = twip_to_mm(getattr(section, "left_margin", None))
+        right = twip_to_mm(getattr(section, "right_margin", None))
+        if None in (top, bottom, left, right):
+            margin_msgs.append(f"sec{idx}(余白取得不可)")
+            margin_fail = True
+            continue
+        margin_msgs.append(f"sec{idx}(上{top:.1f}/下{bottom:.1f}/左{left:.1f}/右{right:.1f}mm)")
+        if not (top >= margin_required["top"] and bottom >= margin_required["bottom"] and left >= margin_required["left"] and right >= margin_required["right"]):
+            margin_fail = True
+
+    detail = "; ".join(margin_msgs) + f" / 基準: 上{margin_required['top']} 下{margin_required['bottom']} 左{margin_required['left']} 右{margin_required['right']}mm"
+    status = "PASS" if not margin_fail else "FAIL"
+    suggested_action = "設定値確認済み。" if status == "PASS" else "ページ設定で余白を補正。"
+    add_result(
+        results,
+        file_path,
+        "Word",
+        "C3",
+        COMMON_MARGIN_RULE_TEXT,
+        status,
+        detail,
+        suggested_action,
+    )
+
+def check_pdf_margin(file_path: Path, results: List, reader):
+    margin_msgs = []
+    margin_fail = False
+    try:
+        for idx, page in enumerate(getattr(reader, "pages", []), start=1):
+            mediabox = getattr(page, "mediabox", None) or getattr(page, "MediaBox", None)
+            if mediabox is None:
+                margin_msgs.append(f"p{idx}(サイズ取得不可)")
+                margin_fail = True
+                continue
+            width_pt = float(mediabox[2]) - float(mediabox[0])
+            height_pt = float(mediabox[3]) - float(mediabox[1])
+            width_mm = width_pt * 25.4 / 72
+            height_mm = height_pt * 25.4 / 72
+            margin_msgs.append(f"p{idx}(サイズ: {width_mm:.1f}x{height_mm:.1f}mm)")
+            # 判定基準: ページサイズがA4(210x297mm)未満ならFAIL
+            if width_mm < 210 or height_mm < 297:
+                margin_fail = True
+    except Exception as exc:
+        margin_msgs.append(f"PDFページサイズ取得失敗: {exc}")
+        margin_fail = True
+    detail = "; ".join(margin_msgs) + " / 判定: ページサイズがA4(210x297mm)未満ならFAIL（余白情報は取得不可）"
+    status = "PASS" if not margin_fail else "FAIL"
+    suggested_action = "設定値確認済み。" if status == "PASS" else "ページサイズをA4基準に合わせてください。"
+    add_result(
+        results,
+        file_path,
+        "PDF",
+        "C3",
+        COMMON_MARGIN_RULE_TEXT,
+        status,
+        detail,
+        suggested_action,
+    )
+
+def check_vsd_margin(file_path: Path, results: List, diagram=None):
+    margin_required = {"top": 20, "bottom": 20, "left": 30, "right": 20}
+    margin_msgs = []
+    margin_fail = False
+    try:
+        from aspose.diagram import Diagram
+        if diagram is None:
+            diagram = Diagram(str(file_path))
+        for idx, page in enumerate(diagram.getPages(), start=1):
+            w = page.getPageSheet().getCells().getCell("PageWidth").getValue()
+            h = page.getPageSheet().getCells().getCell("PageHeight").getValue()
+            width_mm = float(w) * 25.4
+            height_mm = float(h) * 25.4
+            margin_msgs.append(f"p{idx}(サイズ: {width_mm:.1f}x{height_mm:.1f}mm)")
+            if width_mm < 210 or height_mm < 297:
+                margin_fail = True
+    except Exception as exc:
+        margin_msgs.append(f"VSDページサイズ取得失敗: {exc}")
+        margin_fail = True
+    detail = "; ".join(margin_msgs) + f" / 基準: 上{margin_required['top']} 下{margin_required['bottom']} 左{margin_required['left']} 右{margin_required['right']}mm"
+    status = "PASS" if not margin_fail else "FAIL"
+    suggested_action = "設定値確認済み。" if status == "PASS" else "ページサイズをA4基準に合わせてください。"
+    add_result(
+        results,
+        file_path,
+        "VSD",
+        "C3",
+        COMMON_MARGIN_RULE_TEXT,
+        status,
+        detail,
+        suggested_action,
+    )
 
     # P1, P2, P3: ページごとのチェック例（仮実装）
     slide_count = len(prs.slides)
@@ -132,7 +323,18 @@ MM_PER_INCH = 25.4
 EMUS_PER_INCH = 914400
 EMU_PER_MM = EMUS_PER_INCH / MM_PER_INCH
 COMMON_MARGIN_RULE_TEXT = "余白（A4縦:上20/下20/左30/右20mm以上）"
-
+RULE_TYPO = "誤字脱字がないか？資料全体において誤字脱字がないか確認する。あった場合は具体的な場所と該当箇所を明示する。"
+RULE_STYLE_UNIFY = "書式、大字の有無、セル結合の使用箇所、文字そろえが全体で統一されており、資料全体の視認性に違和感がないか確認する。"
+RULE_CUSTOMER_SAMA = "資料中の全ての顧客名称（例：国交省、税機構）に「様」が付けられ、統一されているか確認する。"
+RULE_PERIOD_UNIFY = "文末に「。」の有無が資料全体で統一されているか確認する。"
+RULE_FONT_UNIFY = "提出資料全体のフォントが「MS Pゴシック」で統一されており、資料内で他のフォントが使用されていないか確認する。"
+RULE_MEETING_WORDS = "資料内に「全体会議」「個別会議」という文言が残っておらず、資料の文脈で必要ない会議名称が記載されていないか確認する。"
+RULE_VENDOR_TERM = "資料内に「工程管理支援事業者」の誤記が存在せず、正しく「工程管理等支援事業者」が使用されているかを確認する。表記が統一されているかチェックする。"
+RULE_PROJECT_NAME = "プロジェクト名の表記が一致しているか確認する。特に、M6の「自動車登録検査関係システム」に誤った記載がないかをチェックし、正しく「自動車登録検査業務電子情報処理システム」の表記になっているか確認する。"
+RULE_BOKEI_SYSTEM = "冒頭定義がある場合、「本システム」という記載になっているか確認する。"
+RULE_FIG_TABLE_SEQ = "同じ資料内で図の番号や表の番号の整合はとれているか確認する。"
+RULE_BLUE_RGB = "青字を使用している箇所において、明確に原色の青色が使用されているかを確認する。"
+RULE_FILE_TITLE_EMPTY = "ファイルプロパティの「タイトル」が空白になっているか。"
 
 EXCLUDED_CHECK_IDS: Set[str] = {
     "C2",
@@ -154,10 +356,8 @@ EXCLUDED_CHECK_IDS: Set[str] = {
     "DW05",
 }
 
-# 不要チェックは生成元で削除済み。文言ベース除外は使用しない。
-EXCLUDED_KEYWORDS: Set[str] = set()
-
 EXCLUDED_CHECK_ITEMS_NORMALIZED: Set[str] = {
+    "ppt画像化",
     "ppt画像化",
     "印刷範囲外記載チェック[課題管理表]",
 }
@@ -174,16 +374,32 @@ def normalize_check_item_key(check_item: object) -> str:
 
 def is_excluded_check(check_id: object = "", check_item: object = "") -> bool:
     cid = str(check_id or "").strip().upper()
-
     if cid in EXCLUDED_CHECK_IDS:
         return True
-
+    # 指定ワードでの除外
+    EXCLUDED_KEYWORDS = [
+        "表紙が規定のもの",
+        "共通: 提出資料全体のフォントが「MS Pゴシック」で統一されており、資料内で他のフォントが使用されていないか確認する。",
+        "共通: 青字を使用している箇所において、明確に原色の青色が使用されているかを確認する。",
+        "共通: 誤字脱字がないか？資料全体において誤字脱字がないか確認する。あった場合は具体的な場所と該当箇所を明示する。",
+        "共通: 書式、大字の有無、セル結合の使用箇所、文字そろえが全体で統一されており、資料全体の視認性に違和感がないか確認する。",
+        "共通: 資料中の全ての顧客名称（例：国交省、税機構）に「様」が付けられ、統一されているか確認する。",
+        "共通: 文末に「。」の有無が資料全体で統一されているか確認する。",
+        "共通: 資料内に「全体会議」「個別会議」という文言が残っておらず、資料の文脈で必要ない会議名称が記載されていないか確認する。",
+        "共通: 資料内に「工程管理支援事業者」の誤記が存在せず、正しく「工程管理等支援事業者」が使用されているかを確認する。表記が統一されているかチェックする。",
+        "共通: プロジェクト名の表記が一致しているか確認する。特に、M6の「自動車登録検査関係システム」に誤った記載がないかをチェックし、正しく「自動車登録検査業務電子情報処理システム」の表記になっているか確認する。",
+        "共通: 冒頭定義がある場合、「本システム」という記載になっているか確認する。",
+        "共通: 同じ資料内で図の番号や表の番号の整合はとれているか確認する。",
+        "共通: 記載されている日付が土日祝日や適切でない日付となっていないか確認する。不整合があった場合は具体的な箇所を明示する。",
+        "共通: 資料全体で使用されている赤字、網掛け、黄色マーカ、下線が意味を持ち、有効に活用されているか確認し、不要な書式が残っていないことを確認する。",
+        "共通: 別紙ファイルのファイル名に記載されている別紙番号と別紙内の本文に記載されている別紙番号が一致しているか確認する。文法や表現を統一する。",
+    ]
     check_item_str = str(check_item or "")
     for word in EXCLUDED_KEYWORDS:
-        if word and word in check_item_str:
+        if word in check_item_str:
             return True
-
     return normalize_check_item_key(check_item) in EXCLUDED_CHECK_ITEMS_NORMALIZED
+
 DEFAULT_COVER_KEYWORDS: List[str] = [
     "進捗状況報告",
     "進捗報告",
@@ -239,6 +455,7 @@ TYPE_SPECIFIC_CHECK_ITEMS = {
     "Excel": [],
     "Word": [],
     "PDF": [],
+    "LegacyOffice": [("L1", "旧形式ファイル")],
     # PPT画像化は除外
 }
 
@@ -338,62 +555,6 @@ def inches_to_mm(value: Optional[float]) -> Optional[float]:
         return float(value) * MM_PER_INCH
     except Exception:
         return None
-
-
-
-def _fmt_mm(value: Optional[float]) -> str:
-    if value is None:
-        return "取得不可"
-    return f"{value:.1f}mm"
-
-
-def _evaluate_c3_margin_by_orientation(
-    orientation_label: str,
-    left_mm: Optional[float],
-    right_mm: Optional[float],
-    top_mm: Optional[float],
-    bottom_mm: Optional[float],
-) -> Tuple[bool, str]:
-    """
-    C3余白判定。
-    縦: 左30mm以上、その他20mm以上。
-    横: 上30mm以上、その他20mm以上。
-    """
-    is_portrait = orientation_label == "縦"
-    required = {
-        "左": 30.0 if is_portrait else 20.0,
-        "右": 20.0,
-        "上": 20.0 if is_portrait else 30.0,
-        "下": 20.0,
-    }
-    actual = {
-        "左": left_mm,
-        "右": right_mm,
-        "上": top_mm,
-        "下": bottom_mm,
-    }
-    ok_parts: List[str] = []
-    ng_parts: List[str] = []
-    for label in ("左", "右", "上", "下"):
-        value = actual[label]
-        need = required[label]
-        part = f"{label}={_fmt_mm(value)}(基準{need:.0f}mm以上)"
-        if value is not None and value >= need:
-            ok_parts.append(part)
-        else:
-            ng_parts.append(part)
-    ok = not ng_parts
-    if ok:
-        return True, f"{orientation_label}設定として判定〇: " + ", ".join(ok_parts)
-    return False, f"{orientation_label}設定として判定×: " + ", ".join(ok_parts + ng_parts)
-
-
-def _build_c3_margin_result(details: List[str], judgments: List[bool]) -> Tuple[str, str, str]:
-    if judgments and all(judgments):
-        return "PASS", " / ".join(details), "対応不要。"
-    if not judgments:
-        return "FAIL", "余白情報を取得できませんでした。", "余白設定を確認・修正してください。"
-    return "FAIL", " / ".join(details), "余白設定を確認・修正してください。"
 
 
 def add_result(
@@ -570,8 +731,6 @@ def build_suggested_action_settings(
         seen.add(key)
 
     for result in results:
-        if is_excluded_check(result.check_id, result.check_item):
-            continue
         if display_status(result.status) != "×":
             continue
         key = ((result.file_type or "").upper(), (result.check_id or "").upper(), _normalize_setting_status(result.status))
@@ -1323,7 +1482,7 @@ def run_visual_pipeline(
                     add_result(results, file_path, "CommonVisual", "VISO", "VISIO→PNG変換", "ERROR", detail, "ファイルや環境を確認してください。")
                     return None
                 for idx, image_path in enumerate(sorted(png_files), 1):
-                    visual_pages.append(VisualPage(unified_file_path, idx, str(image_path), sheet_name=None))
+                    visual_pages.append(VisualPage(str(file_path), idx, str(image_path), sheet_name=None))
                 detail = f"{len(png_files)}ページをPNG化(LibreOffice)。"
                 if image_err:
                     detail = f"Aspose/COMは利用不可のため {detail}"
@@ -1438,22 +1597,6 @@ def display_file_path_for_log(file_path: str) -> str:
         return p.name
 
 
-def normalize_preview_file_name(file_path: object) -> str:
-    """image_previewシート表示用のファイル名をResultsと同じ方針で正規化する。"""
-    p = Path(str(file_path))
-    ext = p.suffix.lower()
-    if ext in {'.ppt', '.pptx'}:
-        return p.with_suffix('.ppt').name
-    if ext in {'.vsd', '.vsdx'}:
-        return p.with_suffix('.vsd').name
-    if ext == '.pdf':
-        parent_parts = {part.lower() for part in p.parts}
-        stem_lower = p.stem.lower()
-        if 'pdf' in parent_parts and ('vsd' in stem_lower or 'visio' in stem_lower):
-            return p.with_suffix('.vsd').name
-    return p.name
-
-
 def populate_image_preview_sheet(ws_images, visual_pages: Iterable[VisualPage], preview_pages_per_row: int = 6) -> None:
 
     ws_images.append(["file_name", "page_count", "image_labels..."])
@@ -1490,10 +1633,25 @@ def populate_image_preview_sheet(ws_images, visual_pages: Iterable[VisualPage], 
     FILE_ROW_GAP = 3  # ファイル間の空白行数
     IMAGE_COL_GAP = 1  # 画像間の空白列数
 
+    # resultsで使われているVSDファイル名一覧を作成
+    vsd_names = set()
+    for f in pages_by_file:
+        p = Path(f)
+        if p.suffix.lower() in {'.vsd', '.vsdx'}:
+            vsd_names.add(p.with_suffix('.vsd').name)
+
     for file_idx, (file_path, pages) in enumerate(sorted(pages_by_file.items())):
-        # PPT/PPTX/VSD/VSDXはResultsと同じ表示名に統一する。
-        # 特にVSDは、VSD→PDF→PNGの中間PDF名が出ないように.vsd表示へ正規化する。
-        display_name = normalize_preview_file_name(file_path)
+        # PPT/PPTX/VSD/VSDXは拡張子を統一して表示
+        p = Path(file_path)
+        ext = p.suffix.lower()
+        if ext in {'.ppt', '.pptx'}:
+            display_name = p.with_suffix('.ppt').name
+        elif ext in {'.vsd', '.vsdx'}:
+            display_name = p.with_suffix('.vsd').name
+        elif ext == '.pdf' and p.with_suffix('.vsd').name in vsd_names:
+            display_name = p.with_suffix('.vsd').name
+        else:
+            display_name = p.name
 
         # 画像情報を準備
         img_objs = []
@@ -2336,10 +2494,32 @@ def check_visio(file_path: Path, results: List[CheckResult], cover_keyword: Opti
     )
     add_result(results, file_path, "VISIO", "V6", "参照エラー残存", "FAIL" if ref_error_pages else "PASS", (f"参照エラー文字列を検出。 / {summarize_pages(ref_error_pages)}" if ref_error_pages else "参照エラー文字列なし。 / 指摘対象ページ：なし"), "参照元を修正してください。" if ref_error_pages else "対応不要。")
 
+    maybe_add_or_replace_result(
+        results,
+        file_path,
+        "DV01",
+        "VISIO",
+        "VISIO: ハイパーリンク付き図形が残っていないか確認する。",
+        "WARN" if hyperlink_pages else "PASS",
+        (f"ハイパーリンク付き図形を検出。 / {summarize_pages(hyperlink_pages)}" if hyperlink_pages else "ハイパーリンク付き図形は検出されません。 / 指摘対象ページ：なし"),
+        "不要なハイパーリンクを確認してください。" if hyperlink_pages else "対応不要。",
+    )
 
     custom_prop_summaries = summarize_visio_custom_props(custom_props) if custom_props is not None else []
+    maybe_add_or_replace_result(
+        results,
+        file_path,
+        "DV02",
+        "VISIO",
+        "VISIO: カスタムプロパティが残っていないか確認する。",
+        "WARN" if custom_prop_summaries else "PASS",
+        (f"カスタムプロパティを検出。 / {', '.join(custom_prop_summaries[:5])}" + (f" ほか{len(custom_prop_summaries) - 5}件" if len(custom_prop_summaries) > 5 else "") if custom_prop_summaries else "カスタムプロパティは検出されません。"),
+        "不要なカスタムプロパティを削除してください。" if custom_prop_summaries else "対応不要。",
+    )
 
     title_text = str(getattr(props, "title", "") or "").strip() if props is not None else ""
+    if not is_excluded_check("G19", f"共通: {RULE_FILE_TITLE_EMPTY}"):
+        add_result(results, file_path, "VISIO", "G19", f"共通: {RULE_FILE_TITLE_EMPTY}", "PASS" if not title_text else "FAIL", ("タイトルは空白です。" if not title_text else "ファイルタイトルが設定されています。"), "タイトルを空白にしてください。" if title_text else "対応不要。")
     run_language_consistency_checks(results, file_path, "VISIO", text_pages)
     run_common_textual_auto_checks(results, file_path, "VISIO", text_pages)
     run_date_consistency_check(results, file_path, "VISIO", text_pages)
@@ -2570,6 +2750,18 @@ def color_is_blue_excel(cell) -> bool:
     return False
 
 
+def maybe_add_or_replace_result(results: List[CheckResult], file_path: Path, check_id: str, file_type: str, check_item: str, status: str, detail: str, action: str) -> None:
+    target = str(file_path)
+    if is_excluded_check(check_id, check_item):
+        results[:] = [r for r in results if not (r.file_path == target and r.check_id == check_id)]
+        return
+    for i, r in enumerate(results):
+        if r.file_path == target and r.check_id == check_id:
+            results[i] = CheckResult(target, file_type, check_id, check_item, status, detail, action)
+            return
+    add_result(results, file_path, file_type, check_id, check_item, status, detail, action)
+
+
 def scan_excel_font_and_blue_and_domains(file_path: Path, wb, results: List[CheckResult], text_pages: List[Tuple[str, str]]) -> None:
     domains = detect_domains(file_path)
     non_mp_pages: List[str] = []
@@ -2594,8 +2786,9 @@ def scan_excel_font_and_blue_and_domains(file_path: Path, wb, results: List[Chec
                     header_map[normalize_text(v)] = c
         except Exception:
             header_map = {}
-        skip_font_check = True
-        skip_blue_check = True
+
+        skip_font_check = is_excluded_check("G09", f"共通: {RULE_FONT_UNIFY}")
+        skip_blue_check = is_excluded_check("G17", f"共通: {RULE_BLUE_RGB}")
 
         for row_idx, col_idx, cell in iter_nonempty_cells(ws):
             page_label = infer_excel_print_page_from_breaks(row_break_ids, col_break_ids, row_idx, col_idx)
@@ -2657,6 +2850,55 @@ def scan_excel_font_and_blue_and_domains(file_path: Path, wb, results: List[Chec
                     wbs_seq_all.append(int(m.group(1)))
                     wbs_seq_pages.append(infer_excel_print_page_from_breaks(row_break_ids, col_break_ids, row_idx, col_idx))
 
+    maybe_add_or_replace_result(
+        results, file_path, "G09", "Excel", f"共通: {RULE_FONT_UNIFY}",
+        "FAIL" if non_mp_pages else "PASS",
+        (f"MS Pゴシック以外のフォント候補を検出。 / {summarize_pages(non_mp_pages)}" if non_mp_pages else "フォントはMS Pゴシックで概ね統一されています。 / 指摘対象ページ：なし"),
+        "フォントをMS Pゴシックへ統一してください。" if non_mp_pages else "対応不要。"
+    )
+    maybe_add_or_replace_result(
+        results, file_path, "G17", "Excel", f"共通: {RULE_BLUE_RGB}",
+        "FAIL" if blue_ng_pages else "PASS",
+        (f"原色青以外の青字候補を検出。 / {summarize_pages(blue_ng_pages)}" if blue_ng_pages else "青字は原色青として検出されるか、青字自体がありません。 / 指摘対象ページ：なし"),
+        "青字色コードを見直してください。" if blue_ng_pages else "対応不要。"
+    )
+    maybe_add_or_replace_result(
+        results, file_path, "DE01", "Excel", "Excel: 非表示されている内部ワークシートがあるか確認する。",
+        "FAIL" if hidden_sheets else "PASS",
+        (f"非表示シートを検出: {', '.join(hidden_sheets[:10])}" if hidden_sheets else "非表示シートは検出されません。"),
+        "不要なら表示または削除してください。" if hidden_sheets else "対応不要。"
+    )
+    maybe_add_or_replace_result(
+        results, file_path, "DE03", "Excel", "Excel: ファイル共有設定が解除されているか確認する。",
+        "FAIL" if share_flag else "PASS",
+        ("共有設定の可能性あり。" if share_flag else "共有設定の明確な痕跡は検出されません。"),
+        "共有設定を確認し解除してください。" if share_flag else "対応不要。"
+    )
+
+    if "月間会議計画" in domains:
+        maybe_add_or_replace_result(
+            results, file_path, "K01NAME", "Excel", "月間会議計画: 説明者欄は名前で記載されているか確認する。",
+            "FAIL" if speaker_ng_pages else "PASS",
+            (f"人名以外の説明者候補を検出。 / {summarize_pages(speaker_ng_pages)}" if speaker_ng_pages else "説明者欄は人名らしい記載です。 / 指摘対象ページ：なし"),
+            "説明者欄を人名表記へ修正してください。" if speaker_ng_pages else "対応不要。"
+        )
+
+    if "進捗報告資料（本紙）" in domains:
+        maybe_add_or_replace_result(
+            results, file_path, "K01XY", "Excel", "進捗報告資料（本紙）: 進捗状況報告の宿題事項表における未完了列の記載形式が「X(Y)」形式であることを確認する。",
+            "FAIL" if x_y_ng_pages else "PASS",
+            (f"X(Y)形式でない候補を検出。 / {summarize_pages(x_y_ng_pages)}" if x_y_ng_pages else "未完了列はX(Y)形式で記載されています。 / 指摘対象ページ：なし"),
+            "未完了列をX(Y)形式へ修正してください。" if x_y_ng_pages else "対応不要。"
+        )
+
+    if "WBS/マスタースケジュール" in domains or "進捗報告資料（本紙）" in domains:
+        missing = get_missing_sequence(wbs_seq_all)
+        maybe_add_or_replace_result(
+            results, file_path, "K01WBS", "Excel", "WBS/マスタースケジュール: WBS番号が連番で欠番がないか確認する。",
+            "FAIL" if missing else ("PASS" if wbs_seq_all else "WARN"),
+            (f"WBS欠番={missing[:10]} / {summarize_pages(wbs_seq_pages)}" if missing else ("WBS番号に明確な欠番は検出されません。 / 指摘対象ページ：なし" if wbs_seq_all else "WBS連番を自動抽出できませんでした。 / 指摘対象ページ：目検で確認")),
+            "WBS番号の欠番・重複を確認してください。" if (missing or not wbs_seq_all) else "対応不要。"
+        )
 
 
 def scan_word_font_blue_blank_domains(file_path: Path, doc, results: List[CheckResult], text_pages: List[Tuple[str, str]]) -> None:
@@ -2806,33 +3048,11 @@ def check_excel(file_path: Path, results: List[CheckResult]) -> None:
     add_result(results, file_path, "Excel", "C1", "プロパティ情報削除", "FAIL" if has_props else "PASS", props_detail, "不要プロパティを削除。" if has_props else "対応不要。")
     if not is_excluded_check("C2", "表紙が規定のもの"):
         add_result(results, file_path, "Excel", "C2", "表紙が規定のもの", "MANUAL", "規定表紙照合は目検。 / 指摘対象ページ：目検で確認", "表紙テンプレート照合。")
-    # --- C3: 余白チェック ---
-    margin_details: List[str] = []
-    margin_judgments: List[bool] = []
-    for ws in wb.worksheets:
-        try:
-            orientation = getattr(getattr(ws, "page_setup", None), "orientation", None)
-            orientation_str = str(orientation or "portrait").lower()
-            orientation_label = "横" if orientation_str == "landscape" else "縦"
-            pm = getattr(ws, "page_margins", None)
-            if pm is None:
-                margin_details.append(f"[{ws.title}] 余白情報取得不可（縦横不明） → ×")
-                margin_judgments.append(False)
-                continue
-            left = inches_to_mm(getattr(pm, "left", None))
-            right = inches_to_mm(getattr(pm, "right", None))
-            top = inches_to_mm(getattr(pm, "top", None))
-            bottom = inches_to_mm(getattr(pm, "bottom", None))
-            ok, msg = _evaluate_c3_margin_by_orientation(orientation_label, left, right, top, bottom)
-            margin_judgments.append(ok)
-            margin_details.append(f"[{ws.title}] {msg}")
-        except Exception as e:
-            margin_details.append(f"[{ws.title}] 余白取得エラー: {e}（縦横不明） → ×")
-            margin_judgments.append(False)
-    status, detail, action = _build_c3_margin_result(margin_details, margin_judgments)
-    add_result(results, file_path, "Excel", "C3", COMMON_MARGIN_RULE_TEXT, status, detail, action)
+    check_excel_margin(file_path, results, wb)
     add_result(results, file_path, "Excel", "C4", "ページ番号", "MANUAL", "ヘッダ/フッタのページ番号整合は目検。 / 指摘対象ページ：目検で確認", "ページ番号連番を確認。")
     add_result(results, file_path, "Excel", "C5", "PDF出力結果確認（見切れ/罫線/表サイズ/ページ番号）", "MANUAL", "別シートPNGで目検。 / 指摘対象ページ：目検で確認", "罫線切れ・表不完全・ページ数を確認。")
+    if not is_excluded_check("G19", f"共通: {RULE_FILE_TITLE_EMPTY}"):
+        add_result(results, file_path, "Excel", "G19", f"共通: {RULE_FILE_TITLE_EMPTY}", "PASS" if not (cp.title or "").strip() else "FAIL", ("タイトルは空白です。" if not (cp.title or "").strip() else "ファイルタイトルが設定されています。"), "タイトルを空白にしてください。" if (cp.title or "").strip() else "対応不要。")
     run_language_consistency_checks(results, file_path, "Excel", text_pages)
     run_common_textual_auto_checks(results, file_path, "Excel", text_pages)
     run_date_consistency_check(results, file_path, "Excel", text_pages)
@@ -2939,31 +3159,13 @@ def check_word(file_path: Path, results: List[CheckResult], cover_keyword: Optio
     c2_status, c2_detail, c2_action = evaluate_cover(first_page_text, cover_keyword)
     add_result(results, file_path, "Word", "C2", "表紙が規定のもの", c2_status, c2_detail, c2_action)
 
-    # --- C3: 余白チェック ---
-    margin_details: List[str] = []
-    margin_judgments: List[bool] = []
-    for idx, section in enumerate(doc.sections):
-        try:
-            orientation = getattr(section, "orientation", None)
-            orientation_value = getattr(orientation, "value", orientation)
-            orientation_label = "横" if orientation_value == 1 else "縦"
-            left = mm_from_emu(getattr(section, "left_margin", None))
-            right = mm_from_emu(getattr(section, "right_margin", None))
-            top = mm_from_emu(getattr(section, "top_margin", None))
-            bottom = mm_from_emu(getattr(section, "bottom_margin", None))
-            ok, msg = _evaluate_c3_margin_by_orientation(orientation_label, left, right, top, bottom)
-            margin_judgments.append(ok)
-            margin_details.append(f"[Section{idx+1}] {msg}")
-        except Exception as e:
-            margin_details.append(f"[Section{idx+1}] 余白取得エラー: {e}（縦横不明） → ×")
-            margin_judgments.append(False)
-    status, detail, action = _build_c3_margin_result(margin_details, margin_judgments)
-    add_result(results, file_path, "Word", "C3", COMMON_MARGIN_RULE_TEXT, status, detail, action)
+    check_word_margin(file_path, results, doc)
 
     header_footer_xml = "\n".join(sec.header._element.xml + sec.footer._element.xml for sec in doc.sections)
     has_page_number_field = ("PAGE" in header_footer_xml) or ("w:pgNum" in header_footer_xml)
     add_result(results, file_path, "Word", "C4", "ページ番号", "PASS" if has_page_number_field else "WARN", ("ページ番号フィールドを検出。 / 指摘対象ページ：全体" if has_page_number_field else "ページ番号フィールド未検出。 / 指摘対象ページ：目検で確認"), "ヘッダ/フッタにページ番号設定。" if not has_page_number_field else "対応不要。")
     add_result(results, file_path, "Word", "C5", "PDF出力結果確認（見切れ/罫線/表サイズ/ページ番号）", "MANUAL", "別シートPNGで目検。 / 指摘対象ページ：目検で確認", "罫線切れ・表不完全・ページ数を確認。")
+    add_result(results, file_path, "Word", "G19", f"共通: {RULE_FILE_TITLE_EMPTY}", "PASS" if not (cp.title or "").strip() else "FAIL", ("タイトルは空白です。" if not (cp.title or "").strip() else "ファイルタイトルが設定されています。"), "タイトルを空白にしてください。" if (cp.title or "").strip() else "対応不要。")
 
     text_pages = extract_word_text_pages(doc, file_path)
     run_language_consistency_checks(results, file_path, "Word", text_pages)
@@ -3007,7 +3209,7 @@ def check_pdf(file_path: Path, results: List[CheckResult], cover_keyword: Option
     c2_status, c2_detail, c2_action = evaluate_cover(first_text, cover_keyword)
     add_result(results, file_path, "PDF", "C2", "表紙が規定のもの", c2_status, c2_detail, c2_action)
 
-    add_result(results, file_path, "PDF", "C3", COMMON_MARGIN_RULE_TEXT, "N/A", "余白チェックは対象外。", "対応不要。")
+    check_pdf_margin(file_path, results, reader)
 
     strikeout_annots = 0
     comment_annots = 0
@@ -3068,6 +3270,9 @@ def check_pdf(file_path: Path, results: List[CheckResult], cover_keyword: Option
     page_count = len(reader.pages)
     add_result(results, file_path, "PDF", "C4", "ページ番号", "MANUAL", f"ページ数: {page_count}。 / 指摘対象ページ：目検で確認", "連番整合を目視確認。")
     add_result(results, file_path, "PDF", "C5", "PDF出力結果確認（見切れ/罫線/表サイズ/ページ番号）", "MANUAL", "別シートPNGで目検。 / 指摘対象ページ：目検で確認", "罫線切れ・表不完全・ページ数を確認。")
+    add_result(results, file_path, "PDF", "G09", f"共通: {RULE_FONT_UNIFY}", "MANUAL", "PDFからフォント名の安定抽出は未対応。 / 指摘対象ページ：目検で確認", "必要に応じて元ファイルで確認してください。")
+    add_result(results, file_path, "PDF", "G17", f"共通: {RULE_BLUE_RGB}", "MANUAL", "PDFから色コードの安定抽出は未対応。 / 指摘対象ページ：目検で確認", "必要に応じて元ファイルで確認してください。")
+    add_result(results, file_path, "PDF", "G19", f"共通: {RULE_FILE_TITLE_EMPTY}", "PASS" if not str(metadata.get('/Title') or '').strip() else "FAIL", ("タイトルは空白です。" if not str(metadata.get('/Title') or '').strip() else "ファイルタイトルが設定されています。"), "タイトルを空白にしてください。" if str(metadata.get('/Title') or '').strip() else "対応不要。")
     run_language_consistency_checks(results, file_path, "PDF", text_pages)
     run_common_textual_auto_checks(results, file_path, "PDF", text_pages)
     run_date_consistency_check(results, file_path, "PDF", text_pages)
@@ -3090,6 +3295,7 @@ def check_file(file_path: Path, results: List[CheckResult], cover_keyword: Optio
         check_ppt(file_path, results, cover_keyword)
     elif suffix in {".xls", ".doc"}:
         file_type = "LegacyOffice"
+        add_result(results, file_path, "LegacyOffice", "L1", "旧形式ファイル", "WARN", "旧形式(.xls/.doc)は詳細解析対象外。 / 指摘対象ページ：変換後に確認", "可能なら .xlsx/.docx へ変換。")
 
     if file_type:
         ensure_expected_checks(results, file_path, file_type)
@@ -3251,12 +3457,26 @@ def run_cross_file_consistency_checks(target_files: List[Path], results: List[Ch
         if extra_body:
             status = "WARN" if status == "PASS" else status
             details.append(f"ファイル名と本文の別紙番号不一致候補={extra_body[:10]}")
+        maybe_add_or_replace_result(
+            results, main_fp, "G02", "Excel" if main_fp.suffix.lower() in {'.xlsx', '.xlsm', '.xls'} else ("Word" if main_fp.suffix.lower() in {'.doc', '.docx'} else "PDF"),
+            "共通: 本紙（進捗状況報告）に記載されている別紙番号が、対応する別紙ファイル名と別紙内の本文に記載された番号と完全に一致しているか確認する。",
+            status,
+            (" / ".join(details) if details else "本紙・別紙ファイル名・別紙本文の別紙番号は整合しています。"),
+            "不足または不一致の別紙番号を修正してください。" if status in {"FAIL", "WARN"} else "対応不要。"
+        )
 
     for af in annex_files:
         info = file_info[str(af)]
         body_nums = set(info["annex_nums"])
         name_nums = parse_annex_numbers(af.stem)
         status = "PASS" if body_nums == name_nums else ("FAIL" if name_nums or body_nums else "WARN")
+        maybe_add_or_replace_result(
+            results, af, "G03", "Excel" if af.suffix.lower() in {'.xlsx', '.xlsm', '.xls'} else ("Word" if af.suffix.lower() in {'.doc', '.docx'} else "PDF"),
+            "共通: 別紙ファイルのファイル名に記載されている別紙番号と別紙内の本文に記載されている別紙番号が一致しているか確認する。文法や表現を統一する。",
+            status,
+            (f"ファイル名={sorted(name_nums)} / 本文={sorted(body_nums)}" if (name_nums or body_nums) else "別紙番号を抽出できませんでした。"),
+            "ファイル名と本文の別紙番号を一致させてください。" if status != "PASS" else "対応不要。"
+        )
 
     evm_wbs_union: Set[str] = set()
     for ef in evm_files:
@@ -3274,6 +3494,13 @@ def run_cross_file_consistency_checks(target_files: List[Path], results: List[Ch
         if extra:
             status = "WARN" if status == "PASS" else status
             details.append(f"EVMにあり本紙になし={extra[:12]}")
+        maybe_add_or_replace_result(
+            results, main_fp, "G04", "Excel" if main_fp.suffix.lower() in {'.xlsx', '.xlsm', '.xls'} else ("Word" if main_fp.suffix.lower() in {'.doc', '.docx'} else "PDF"),
+            "共通: 本紙（進捗状況報告）に記載されたWBS番号がEVMファイル内のタスク状態（開始、進行中、完了）と一致しており、不整合や漏れがないか確認する。",
+            status,
+            (" / ".join(details) if details else "本紙とEVMのWBS番号集合に明確な不整合は検出されません。"),
+            "本紙とEVMのWBS番号対応を見直してください。" if status in {"FAIL", "WARN"} else "対応不要。"
+        )
 
 
 def main(
@@ -3452,20 +3679,6 @@ def main(
     print(f"処理終了: {time.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"全体処理時間: {time.perf_counter() - start_ts:.2f}秒")
     report_progress("done", cancelled=(cancel_requested is not None and cancel_requested()))
-
-
-def detect_page_orientation(page_width_mm: float, page_height_mm: float) -> str:
-    return "縦向き" if page_height_mm >= page_width_mm else "横向き"
-
-
-def evaluate_margin_by_orientation(orientation: str, top: float, bottom: float, left: float, right: float):
-    if orientation == "縦向き":
-        passed = left >= 30 and top >= 20 and bottom >= 20 and right >= 20
-        rule = "判定基準: 左>=30, その他>=20"
-    else:
-        passed = top >= 30 and left >= 20 and bottom >= 20 and right >= 20
-        rule = "判定基準: 上>=30, その他>=20"
-    return passed, rule
 
 
 if __name__ == "__main__":
