@@ -85,8 +85,6 @@ except Exception:
 MM_PER_INCH = 25.4
 EMUS_PER_INCH = 914400
 EMU_PER_MM = EMUS_PER_INCH / MM_PER_INCH
-COMMON_MARGIN_RULE_TEXT = "余白（A4縦:上20/下20/左30/右20mm以上）"
-
 EXCLUDED_CHECK_IDS: Set[str] = set()
 EXCLUDED_CHECK_ITEMS_NORMALIZED: Set[str] = set()
 
@@ -102,9 +100,6 @@ def normalize_check_item_key(check_item: object) -> str:
 
 
 def is_excluded_check(check_id: object = "", check_item: object = "") -> bool:
-    # C3（余白チェック）は完全除外
-    if str(check_id).strip().upper() == "C3":
-        return True
     return False
 
 
@@ -154,7 +149,6 @@ class VisualPage:
 COMMON_CHECK_ITEMS: List[Tuple[str, str]] = [
     ("C1", "プロパティ情報削除"),
     ("C2", "表紙が規定のもの"),
-    ("C3", COMMON_MARGIN_RULE_TEXT),
     ("C4", "ページ番号"),
     ("C5", "PDF出力結果確認（見切れ/罫線/表サイズ/ページ番号）"),
 ]
@@ -213,56 +207,6 @@ def inches_to_mm(value: Optional[float]) -> Optional[float]:
     except Exception:
         return None
 
-
-def _margin_orientation_label(is_landscape: bool) -> str:
-    return "横" if is_landscape else "縦"
-
-
-def _judge_c3_margin(top: Optional[float], bottom: Optional[float], left: Optional[float], right: Optional[float], is_landscape: bool) -> Tuple[bool, str]:
-    """
-    C3判定:
-      縦設定: 左30mm以上、右・上・下20mm以上
-      横設定: 上30mm以上、左・右・下20mm以上
-    """
-    if None in (top, bottom, left, right):
-        return False, "余白取得不可"
-    if is_landscape:
-        ok = top >= 30 and left >= 20 and right >= 20 and bottom >= 20
-        basis = "横設定: 上30mm以上、左・右・下20mm以上"
-    else:
-        ok = left >= 30 and top >= 20 and right >= 20 and bottom >= 20
-        basis = "縦設定: 左30mm以上、右・上・下20mm以上"
-    label = _margin_orientation_label(is_landscape)
-    judgement = f"{label}設定として判定〇" if ok else f"{label}設定として判定×"
-    return ok, f"上{top:.1f}/下{bottom:.1f}/左{left:.1f}/右{right:.1f}mm / {basis} / {judgement}"
-
-
-def _excel_is_landscape(ws) -> bool:
-    orientation = str(getattr(getattr(ws, "page_setup", None), "orientation", "") or "").lower()
-    if "landscape" in orientation or orientation in {"横", "yoko"}:
-        return True
-    if "portrait" in orientation or orientation in {"縦", "tate"}:
-        return False
-    try:
-        paper_width = getattr(ws.page_setup, "paperWidth", None)
-        paper_height = getattr(ws.page_setup, "paperHeight", None)
-        if paper_width and paper_height:
-            return float(paper_width) > float(paper_height)
-    except Exception:
-        pass
-    return False
-
-
-def _word_is_landscape(section) -> bool:
-    try:
-        width = mm_from_emu(getattr(section, "page_width", None))
-        height = mm_from_emu(getattr(section, "page_height", None))
-        if width is not None and height is not None and width > height:
-            return True
-    except Exception:
-        pass
-    orientation = str(getattr(section, "orientation", "") or "").lower()
-    return "landscape" in orientation or orientation in {"1", "wdorientlandscape", "横"}
 
 
 def _runtime_base_dirs() -> List[Path]:
@@ -565,6 +509,123 @@ def _build_property_detail(fields: List[Tuple[str, object]]) -> Tuple[bool, str]
         parts.append(f"{label}={text}")
     head = "プロパティ情報が残っています。" if has_any else "主要プロパティは空です。"
     return has_any, " / ".join([head] + parts)
+
+
+MAJOR_PROPERTY_LABELS: List[str] = [
+    "タイトル",
+    "件名",
+    "タグ",
+    "分類",
+    "作成者",
+    "前回保存者",
+    "改訂番号",
+    "バージョン番号",
+]
+
+
+def _prop_to_text(value: object) -> str:
+    if value is None:
+        return ""
+    try:
+        return str(value).strip()
+    except Exception:
+        return ""
+
+
+def _format_major_property_detail(values: Dict[str, object]) -> Tuple[bool, str]:
+    normalized = {label: _prop_to_text(values.get(label, "")) for label in MAJOR_PROPERTY_LABELS}
+    has_any = any(normalized.values())
+    detail = " / ".join(f"{label}={normalized[label]}" for label in MAJOR_PROPERTY_LABELS)
+    return has_any, detail
+
+
+def _major_properties_from_word_core(core: object) -> Tuple[bool, str]:
+    values = {
+        "タイトル": getattr(core, "title", ""),
+        "件名": getattr(core, "subject", ""),
+        "タグ": getattr(core, "keywords", ""),
+        "分類": getattr(core, "category", ""),
+        "作成者": getattr(core, "author", ""),
+        "前回保存者": getattr(core, "last_modified_by", ""),
+        "改訂番号": getattr(core, "revision", ""),
+        "バージョン番号": getattr(core, "version", ""),
+    }
+    return _format_major_property_detail(values)
+
+
+def _major_properties_from_excel_core(core: object) -> Tuple[bool, str]:
+    values = {
+        "タイトル": getattr(core, "title", ""),
+        "件名": getattr(core, "subject", ""),
+        "タグ": getattr(core, "keywords", ""),
+        "分類": getattr(core, "category", ""),
+        "作成者": getattr(core, "creator", ""),
+        "前回保存者": getattr(core, "lastModifiedBy", ""),
+        "改訂番号": getattr(core, "revision", ""),
+        "バージョン番号": getattr(core, "version", ""),
+    }
+    return _format_major_property_detail(values)
+
+
+def _read_builtin_doc_prop(props: object, *names: str) -> str:
+    for name in names:
+        try:
+            return _prop_to_text(props(name).Value)
+        except Exception:
+            pass
+        try:
+            return _prop_to_text(props.Item(name).Value)
+        except Exception:
+            pass
+    return ""
+
+
+def read_excel_binary_property_detail(file_path: Path) -> Tuple[bool, str, Optional[str]]:
+    """Excel COMで .xls の主要プロパティを取得する。Windows/Excel未導入時はエラー文字列を返す。"""
+    try:
+        import pythoncom
+        import win32com.client
+    except Exception as exc:
+        return False, _format_major_property_detail({})[1], f"Excel COMを利用できません: {exc}"
+
+    excel = None
+    wb = None
+    pythoncom.CoInitialize()
+    try:
+        excel = win32com.client.Dispatch("Excel.Application")
+        excel.Visible = False
+        excel.DisplayAlerts = False
+        wb = excel.Workbooks.Open(str(file_path), ReadOnly=True)
+        props = wb.BuiltinDocumentProperties
+        values = {
+            "タイトル": _read_builtin_doc_prop(props, "Title", "タイトル"),
+            "件名": _read_builtin_doc_prop(props, "Subject", "件名"),
+            "タグ": _read_builtin_doc_prop(props, "Keywords", "Tags", "キーワード", "タグ"),
+            "分類": _read_builtin_doc_prop(props, "Category", "分類"),
+            "作成者": _read_builtin_doc_prop(props, "Author", "作成者"),
+            "前回保存者": _read_builtin_doc_prop(props, "Last author", "Last Author", "前回保存者"),
+            "改訂番号": _read_builtin_doc_prop(props, "Revision number", "Revision Number", "改訂番号"),
+            "バージョン番号": _read_builtin_doc_prop(props, "Version", "バージョン番号"),
+        }
+        has_props, detail = _format_major_property_detail(values)
+        return has_props, detail, None
+    except Exception as exc:
+        return False, _format_major_property_detail({})[1], f"Excel .xls プロパティ取得失敗: {exc}"
+    finally:
+        if wb is not None:
+            try:
+                wb.Close(False)
+            except Exception:
+                pass
+        if excel is not None:
+            try:
+                excel.Quit()
+            except Exception:
+                pass
+        try:
+            pythoncom.CoUninitialize()
+        except Exception:
+            pass
 
 
 
@@ -2286,7 +2347,6 @@ def check_ppt(file_path: Path, results: List[CheckResult], cover_keyword: Option
     c2_status, c2_detail, c2_action = evaluate_cover(slide_text, cover_keyword)
     add_result(results, file_path, "PPT", "C2", "表紙が規定のもの", c2_status, c2_detail, c2_action)
 
-    add_result(results, file_path, "PPT", "C3", COMMON_MARGIN_RULE_TEXT, "N/A", "PPTはページ余白を安定取得できないため対象外。画像シートでレイアウトを確認してください。", "対応不要。")
     slide_count = len(prs.slides)
     add_result(results, file_path, "PPT", "C4", "ページ番号", "MANUAL", f"スライド数: {slide_count}。 / 指摘対象ページ：目検で確認", "連番整合を目視確認。")
     add_result(results, file_path, "PPT", "C5", "PDF出力結果確認（見切れ/罫線/表サイズ/ページ番号）", "MANUAL", "別シートPNGで目検。 / 指摘対象ページ：目検で確認", "罫線切れ・表不完全・ページ数を確認。")
@@ -2319,7 +2379,6 @@ def check_visio(file_path: Path, results: List[CheckResult], cover_keyword: Opti
     c2_status, c2_detail, c2_action = evaluate_cover(first_page_text, cover_keyword)
     add_result(results, file_path, "VISIO", "C2", "表紙が規定のもの", c2_status, c2_detail, c2_action)
 
-    add_result(results, file_path, "VISIO", "C3", COMMON_MARGIN_RULE_TEXT, "N/A", "余白チェックは対象外。", "対応不要。")
 
     page_count = getattr(getattr(diagram, "pages", None), "count", 0) or 0
     add_result(results, file_path, "VISIO", "C4", "ページ番号", "MANUAL", f"ページ数: {page_count}。 / 指摘対象ページ：目検で確認", "連番整合を目視確認。")
@@ -3052,50 +3111,16 @@ def check_excel(file_path: Path, results: List[CheckResult]) -> None:
 
  
 
-    cp = wb.properties
-
-    has_props = any(
-
-        [
-
-            cp.creator,
-
-            cp.lastModifiedBy,
-
-            cp.title,
-
-            cp.subject,
-
-            cp.keywords,
-
-            cp.description,
-
-            cp.category,
-
-            cp.contentStatus,
-
-        ]
-
-    )
-
+    has_props, props_detail = _major_properties_from_excel_core(wb.properties)
     add_result(
-
         results,
-
         file_path,
-
         "Excel",
-
         "C1",
-
         "プロパティ情報削除",
-
         "FAIL" if has_props else "PASS",
-
-        "プロパティ情報が残っています。" if has_props else "主要プロパティは空です。",
-
+        props_detail,
         "ファイル情報のプロパティを削除。" if has_props else "対応不要。",
-
     )
 
  
@@ -3122,30 +3147,6 @@ def check_excel(file_path: Path, results: List[CheckResult]) -> None:
 
  
 
-    margin_msgs = []
-    margin_fail = False
-    for ws in wb.worksheets:
-        pm = ws.page_margins
-        top = inches_to_mm(getattr(pm, "top", None))
-        bottom = inches_to_mm(getattr(pm, "bottom", None))
-        left = inches_to_mm(getattr(pm, "left", None))
-        right = inches_to_mm(getattr(pm, "right", None))
-        is_landscape = _excel_is_landscape(ws)
-        ok, msg = _judge_c3_margin(top, bottom, left, right, is_landscape)
-        margin_msgs.append(f"{ws.title}({msg})")
-        if not ok:
-            margin_fail = True
-
-    add_result(
-        results,
-        file_path,
-        "Excel",
-        "C3",
-        COMMON_MARGIN_RULE_TEXT,
-        "FAIL" if margin_fail else "PASS",
-        "; ".join(margin_msgs),
-        "ページ設定で余白を補正。" if margin_fail else "設定値確認済み。",
-    )
 
     add_result(
         results,
@@ -3524,48 +3525,16 @@ def check_word(file_path: Path, results: List[CheckResult], cover_keyword: Optio
 
  
 
-    cp = doc.core_properties
-
-    has_props = any(
-
-        [
-
-            cp.author,
-
-            cp.last_modified_by,
-
-            cp.title,
-
-            cp.subject,
-
-            cp.keywords,
-
-            cp.comments,
-
-            cp.category,
-
-        ]
-
-    )
-
+    has_props, props_detail = _major_properties_from_word_core(doc.core_properties)
     add_result(
-
         results,
-
         file_path,
-
         "Word",
-
         "C1",
-
         "プロパティ情報削除",
-
         "FAIL" if has_props else "PASS",
-
-        "プロパティ情報が残っています。" if has_props else "主要プロパティは空です。",
-
+        props_detail,
         "ファイル情報のプロパティを削除。" if has_props else "対応不要。",
-
     )
 
  
@@ -3620,32 +3589,6 @@ def check_word(file_path: Path, results: List[CheckResult], cover_keyword: Optio
 
  
 
-    margin_fail_msgs = []
-    margin_ok_msgs = []
-    for idx, section in enumerate(doc.sections, start=1):
-        top = mm_from_emu(section.top_margin)
-        bottom = mm_from_emu(section.bottom_margin)
-        left = mm_from_emu(section.left_margin)
-        right = mm_from_emu(section.right_margin)
-        is_landscape = _word_is_landscape(section)
-        ok, msg = _judge_c3_margin(top, bottom, left, right, is_landscape)
-        full_msg = f"sec{idx}({msg})"
-        if ok:
-            margin_ok_msgs.append(full_msg)
-        else:
-            margin_fail_msgs.append(full_msg)
-
-
-    add_result(
-        results,
-        file_path,
-        "Word",
-        "C3",
-        COMMON_MARGIN_RULE_TEXT,
-        "FAIL" if margin_fail_msgs else "PASS",
-        "; ".join(margin_fail_msgs if margin_fail_msgs else margin_ok_msgs),
-        "ページ設定で余白を補正。" if margin_fail_msgs else "対応不要。",
-    )
 
     # ページ番号フィールド検出ロジックを追加
     try:
@@ -3850,25 +3793,6 @@ def check_pdf(file_path: Path, results: List[CheckResult], cover_keyword: Option
 
  
 
-    add_result(
-
-        results,
-
-        file_path,
-
-        "PDF",
-
-        "C3",
-
-        COMMON_MARGIN_RULE_TEXT,
-
-        "MANUAL",
-
-        "PDFはレイアウト固定で余白の厳密自動判定が難しいため手動確認です（基準: 上20/下20/左30/右20mm以上）。",
-
-        "表示倍率100%で余白とパンチ穴干渉を確認。",
-
-    )
 
  
 
@@ -4193,9 +4117,22 @@ def check_file(file_path: Path, results: List[CheckResult], cover_keyword: Optio
     elif suffix in {".ppt", ".pptx"}:
         file_type = "PPT"
         check_ppt(file_path, results, cover_keyword)
-    elif suffix in {".xls", ".doc"}:
+    elif suffix == ".xls":
+        file_type = "Excel"
+        has_props, props_detail, prop_err = read_excel_binary_property_detail(file_path)
+        add_result(
+            results,
+            file_path,
+            "Excel",
+            "C1",
+            "プロパティ情報削除",
+            "ERROR" if prop_err else ("FAIL" if has_props else "PASS"),
+            props_detail if not prop_err else f"{props_detail} / {prop_err}",
+            "Excelが利用できるWindows環境で再実行してください。" if prop_err else ("ファイル情報のプロパティを削除。" if has_props else "対応不要。"),
+        )
+    elif suffix == ".doc":
         file_type = "LegacyOffice"
-        add_result(results, file_path, "LegacyOffice", "L1", "旧形式ファイル", "WARN", "旧形式(.xls/.doc)は詳細解析対象外。 / 指摘対象ページ：変換後に確認", "可能なら .xlsx/.docx へ変換。")
+        add_result(results, file_path, "LegacyOffice", "L1", "旧形式ファイル", "WARN", "旧形式(.doc)は詳細解析対象外。 / 指摘対象ページ：変換後に確認", "可能なら .docx へ変換。")
 
     # V5基準: 実際にチェックした結果のみ出力する。未対応/N/Aの補完は行わない。
 
@@ -4344,52 +4281,6 @@ def main(
     other_files = list(find_other_files(root, exclude_paths={out_xlsx, assets_root}))
     # チェック対象外ファイルはresultsから除外
     target_files = [f for f in target_files if f.suffix.lower() in {".xlsx", ".xlsm", ".xls", ".docx", ".doc", ".pdf", ".ppt", ".pptx", ".vsd", ".vsdx"}]
-    # --- ファイルプロパティ情報取得関数 ---
-    def get_file_property_detail(file_path: Path) -> str:
-        """
-        ファイルのプロパティ情報（タイトル、件名、タグ、分類、作成者、前回保存者、改訂番号、バージョン番号）を取得し、
-        "タイトル=... / 件名=... / ..." の形式で返す。取得できない場合は空欄。
-        """
-        suffix = file_path.suffix.lower()
-        props = {
-            "タイトル": "",
-            "件名": "",
-            "タグ": "",
-            "分類": "",
-            "作成者": "",
-            "前回保存者": "",
-            "改訂番号": "",
-            "バージョン番号": ""
-        }
-        try:
-            if suffix == ".docx" and Document is not None:
-                doc = Document(file_path)
-                core = doc.core_properties
-                props["タイトル"] = getattr(core, "title", "") or ""
-                props["件名"] = getattr(core, "subject", "") or ""
-                props["タグ"] = getattr(core, "keywords", "") or ""
-                props["分類"] = getattr(core, "category", "") or ""
-                props["作成者"] = getattr(core, "author", "") or ""
-                props["前回保存者"] = getattr(core, "last_modified_by", "") or ""
-                props["改訂番号"] = getattr(core, "revision", "") or ""
-                props["バージョン番号"] = getattr(core, "version", "") or ""
-            elif suffix in {".xlsx", ".xlsm", ".xls"} and load_workbook is not None:
-                wb = load_workbook(file_path, read_only=True, data_only=True)
-                core = getattr(wb, "properties", None)
-                if core:
-                    props["タイトル"] = getattr(core, "title", "") or ""
-                    props["件名"] = getattr(core, "subject", "") or ""
-                    props["タグ"] = getattr(core, "keywords", "") or ""
-                    props["分類"] = getattr(core, "category", "") or ""
-                    props["作成者"] = getattr(core, "creator", "") or ""
-                    props["前回保存者"] = getattr(core, "lastModifiedBy", "") or ""
-                    props["改訂番号"] = getattr(core, "revision", "") or ""
-                    props["バージョン番号"] = getattr(core, "version", "") or ""
-                wb.close()
-            # 他形式（pptx, pdf, vsd等）は必要に応じて拡張
-        except Exception:
-            pass
-        return " / ".join([f"{k}={v}" for k, v in props.items()])
     results: List[CheckResult] = []
     visual_pages: List[VisualPage] = []
     visual_enabled = not args.no_visual
