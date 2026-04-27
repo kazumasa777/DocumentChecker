@@ -1,0 +1,1 @@
+Aspose.Diagram を利用できません(Python 3.14): No module named 'aspose' / Visio COM 変換失敗: (-2147221005, 'クラス文字列が無効です', None, None) / LibreOffice が見つからないため変換できません。 / LibreOfficeが見つかりません。 Visio for Web(Graph API)による変換にはMicrosoftアカウント認証が必要です。
