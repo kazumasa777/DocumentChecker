@@ -802,4 +802,3 @@ if __name__ == "__main__":
         auto_close=auto_close,
     )
     app.mainloop()
-
