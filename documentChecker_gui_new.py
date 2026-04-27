@@ -310,6 +310,24 @@ def stage_folder_pdf_first(
     proxy_map: Dict[str, Dict[str, str]] = {}
     visio_sources: List[Path] = []
 
+    # documentChecker.main() はステージングフォルダを走査するため、
+    # VSD前処理時も対象外ファイルが other_files シートに出るように、
+    # サポート対象外ファイルも一時フォルダへコピーする。
+    ignored_dir_names = {".git", "__pycache__", ".venv", "venv"}
+    for dirpath, dirnames, filenames in os.walk(root_path):
+        dirnames[:] = [d for d in dirnames if d not in ignored_dir_names]
+        dir_path = Path(dirpath)
+        for filename in filenames:
+            if filename.startswith("~$"):
+                continue
+            src = (dir_path / filename).resolve()
+            if src.suffix.lower() in SUPPORTED_EXTENSIONS:
+                continue
+            try:
+                _copy_file_preserve_tree(src, staged_root, root_path)
+            except Exception:
+                pass
+
     for src_str in files:
         src = Path(src_str).resolve()
         if src.suffix.lower() in VISIO_EXTENSIONS:
@@ -802,3 +820,4 @@ if __name__ == "__main__":
         auto_close=auto_close,
     )
     app.mainloop()
+
