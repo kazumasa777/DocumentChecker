@@ -1,241 +1,4 @@
-
 from __future__ import annotations
-
-def check_excel_margin(file_path: Path, results: List, wb):
-    margin_required = {"top": 20, "bottom": 20, "left": 30, "right": 20}
-    margin_msgs = []
-    margin_fail = False
-    for ws in wb.worksheets:
-        pm = getattr(ws, "page_margins", None)
-        def to_mm(val):
-            return float(val) * MM_PER_INCH if val is not None else None
-        top = to_mm(getattr(pm, "top", None))
-        bottom = to_mm(getattr(pm, "bottom", None))
-        left = to_mm(getattr(pm, "left", None))
-        right = to_mm(getattr(pm, "right", None))
-        if None in (top, bottom, left, right):
-            margin_msgs.append(f"{ws.title}(余白取得不可)")
-            margin_fail = True
-            continue
-        margin_msgs.append(f"{ws.title}(上{top:.1f}/下{bottom:.1f}/左{left:.1f}/右{right:.1f}mm)")
-        if not (top >= margin_required["top"] and bottom >= margin_required["bottom"] and left >= margin_required["left"] and right >= margin_required["right"]):
-            margin_fail = True
-    detail = "; ".join(margin_msgs) + f" / 基準: 上{margin_required['top']} 下{margin_required['bottom']} 左{margin_required['left']} 右{margin_required['right']}mm"
-    status = "PASS" if not margin_fail else "FAIL"
-    suggested_action = "設定値確認済み。" if status == "PASS" else "ページ設定で余白を補正。"
-    add_result(
-        results,
-        file_path,
-        "Excel",
-        "C3",
-        COMMON_MARGIN_RULE_TEXT,
-        status,
-        detail,
-        suggested_action,
-    )
-
-def check_ppt(file_path: Path, results: List[CheckResult], cover_keyword: Optional[str]) -> None:
-    """
-    PPT/PPTXファイルの内容チェック（VISIOと同様のC1, C3, P1, P2, P3, C4, C5, V1など）
-    """
-    try:
-        from pptx import Presentation
-    except ImportError:
-        add_result(results, file_path, "PPT", "P-ENV", "PPT解析ライブラリ", "ERROR", "python-pptx が未インストール。", "pip install python-pptx")
-        return
-
-    prs = None
-    try:
-        prs = Presentation(str(file_path))
-    except Exception as exc:
-        add_result(results, file_path, "PPT", "P-OPEN", "PPTファイル読込", "ERROR", f"読込失敗: {exc}", "ファイル状態確認。")
-        return
-
-    # C1: プロパティ情報削除
-    props = prs.core_properties
-    has_props = any([
-        props.title, props.subject, props.keywords, props.category,
-        props.author, props.last_modified_by, props.comments
-    ])
-    props_detail = f"タイトル: {props.title}, 件名: {props.subject}, キーワード: {props.keywords}, 分類: {props.category}, 作成者: {props.author}, 管理者: {props.last_modified_by}, コメント: {props.comments}"
-    add_result(results, file_path, "PPT", "C1", "プロパティ情報削除", "FAIL" if has_props else "PASS", props_detail, "不要プロパティを削除。" if has_props else "対応不要。")
-
-    # C3: 余白チェック（PPTのページ余白を取得して判定）
-    try:
-        # 単位はEMU（914400 = 1インチ）
-        # 1インチ = 25.4mm
-        # 余白基準値（mm）
-        margin_required = {"top": 20, "bottom": 20, "left": 30, "right": 20}
-        # pptxのスライドサイズはページ全体、余白は直接取得できないため、
-        # スライドサイズとページサイズから余白を推定する（標準PPTは余白なしが多い）
-        slide_width = prs.slide_width
-        slide_height = prs.slide_height
-        # 通常A4縦: 210mm x 297mm
-        a4_width_mm = 210
-        a4_height_mm = 297
-        emu_per_mm = EMUS_PER_INCH / MM_PER_INCH
-        a4_width_emu = int(a4_width_mm * emu_per_mm)
-        a4_height_emu = int(a4_height_mm * emu_per_mm)
-        # 余白を計算（A4サイズとの差分を左右上下に分配）
-        margin_left = max((a4_width_emu - slide_width) // 2, 0)
-        margin_right = margin_left
-        margin_top = max((a4_height_emu - slide_height) // 2, 0)
-        margin_bottom = margin_top
-        # mm換算
-        margin_left_mm = round(margin_left / emu_per_mm, 1)
-        margin_right_mm = round(margin_right / emu_per_mm, 1)
-        margin_top_mm = round(margin_top / emu_per_mm, 1)
-        margin_bottom_mm = round(margin_bottom / emu_per_mm, 1)
-        # 判定
-        is_ok = (
-            margin_top_mm >= margin_required["top"] and
-            margin_bottom_mm >= margin_required["bottom"] and
-            margin_left_mm >= margin_required["left"] and
-            margin_right_mm >= margin_required["right"]
-        )
-        detail = (
-            f"スライドサイズ: {round(slide_width / emu_per_mm, 1)}mm x {round(slide_height / emu_per_mm, 1)}mm / "
-            f"A4: {a4_width_mm}mm x {a4_height_mm}mm / "
-            f"余白(上/下/左/右): {margin_top_mm}/{margin_bottom_mm}/{margin_left_mm}/{margin_right_mm}mm / "
-            f"基準: 上{margin_required['top']} 下{margin_required['bottom']} 左{margin_required['left']} 右{margin_required['right']}mm"
-        )
-        status = "PASS" if is_ok else "FAIL"
-        suggested_action = "対応不要。" if is_ok else "スライドサイズをA4基準に合わせて余白を確保してください。"
-        add_result(results, file_path, "PPT", "C3", COMMON_MARGIN_RULE_TEXT, status, detail, suggested_action)
-    except Exception as exc:
-        add_result(results, file_path, "PPT", "C3", COMMON_MARGIN_RULE_TEXT, "ERROR", f"余白判定失敗: {exc}", "目視で確認してください。")
-
-def check_word_margin(file_path: Path, results: List, doc):
-    margin_required = {"top": 20, "bottom": 20, "left": 30, "right": 20}
-    margin_msgs = []
-    margin_fail = False
-
-    def twip_to_mm(val):
-        try:
-            if val is None:
-                return None
-            # python-docxのLength型なら.twipsで取得
-            if hasattr(val, "twips"):
-                v = val.twips
-            else:
-                v = float(val)
-            mm = v * 25.4 / 1440
-            if mm < 0 or mm > 200:
-                return None
-            return mm
-        except Exception:
-            return None
-
-    for idx, section in enumerate(getattr(doc, "sections", []), start=1):
-        top = twip_to_mm(getattr(section, "top_margin", None))
-        bottom = twip_to_mm(getattr(section, "bottom_margin", None))
-        left = twip_to_mm(getattr(section, "left_margin", None))
-        right = twip_to_mm(getattr(section, "right_margin", None))
-        if None in (top, bottom, left, right):
-            margin_msgs.append(f"sec{idx}(余白取得不可)")
-            margin_fail = True
-            continue
-        margin_msgs.append(f"sec{idx}(上{top:.1f}/下{bottom:.1f}/左{left:.1f}/右{right:.1f}mm)")
-        if not (top >= margin_required["top"] and bottom >= margin_required["bottom"] and left >= margin_required["left"] and right >= margin_required["right"]):
-            margin_fail = True
-
-    detail = "; ".join(margin_msgs) + f" / 基準: 上{margin_required['top']} 下{margin_required['bottom']} 左{margin_required['left']} 右{margin_required['right']}mm"
-    status = "PASS" if not margin_fail else "FAIL"
-    suggested_action = "設定値確認済み。" if status == "PASS" else "ページ設定で余白を補正。"
-    add_result(
-        results,
-        file_path,
-        "Word",
-        "C3",
-        COMMON_MARGIN_RULE_TEXT,
-        status,
-        detail,
-        suggested_action,
-    )
-
-def check_pdf_margin(file_path: Path, results: List, reader):
-    margin_msgs = []
-    margin_fail = False
-    try:
-        for idx, page in enumerate(getattr(reader, "pages", []), start=1):
-            mediabox = getattr(page, "mediabox", None) or getattr(page, "MediaBox", None)
-            if mediabox is None:
-                margin_msgs.append(f"p{idx}(サイズ取得不可)")
-                margin_fail = True
-                continue
-            width_pt = float(mediabox[2]) - float(mediabox[0])
-            height_pt = float(mediabox[3]) - float(mediabox[1])
-            width_mm = width_pt * 25.4 / 72
-            height_mm = height_pt * 25.4 / 72
-            margin_msgs.append(f"p{idx}(サイズ: {width_mm:.1f}x{height_mm:.1f}mm)")
-            # 判定基準: ページサイズがA4(210x297mm)未満ならFAIL
-            if width_mm < 210 or height_mm < 297:
-                margin_fail = True
-    except Exception as exc:
-        margin_msgs.append(f"PDFページサイズ取得失敗: {exc}")
-        margin_fail = True
-    detail = "; ".join(margin_msgs) + " / 判定: ページサイズがA4(210x297mm)未満ならFAIL（余白情報は取得不可）"
-    status = "PASS" if not margin_fail else "FAIL"
-    suggested_action = "設定値確認済み。" if status == "PASS" else "ページサイズをA4基準に合わせてください。"
-    add_result(
-        results,
-        file_path,
-        "PDF",
-        "C3",
-        COMMON_MARGIN_RULE_TEXT,
-        status,
-        detail,
-        suggested_action,
-    )
-
-def check_vsd_margin(file_path: Path, results: List, diagram=None):
-    margin_required = {"top": 20, "bottom": 20, "left": 30, "right": 20}
-    margin_msgs = []
-    margin_fail = False
-    try:
-        from aspose.diagram import Diagram
-        if diagram is None:
-            diagram = Diagram(str(file_path))
-        for idx, page in enumerate(diagram.getPages(), start=1):
-            w = page.getPageSheet().getCells().getCell("PageWidth").getValue()
-            h = page.getPageSheet().getCells().getCell("PageHeight").getValue()
-            width_mm = float(w) * 25.4
-            height_mm = float(h) * 25.4
-            margin_msgs.append(f"p{idx}(サイズ: {width_mm:.1f}x{height_mm:.1f}mm)")
-            if width_mm < 210 or height_mm < 297:
-                margin_fail = True
-    except Exception as exc:
-        margin_msgs.append(f"VSDページサイズ取得失敗: {exc}")
-        margin_fail = True
-    detail = "; ".join(margin_msgs) + f" / 基準: 上{margin_required['top']} 下{margin_required['bottom']} 左{margin_required['left']} 右{margin_required['right']}mm"
-    status = "PASS" if not margin_fail else "FAIL"
-    suggested_action = "設定値確認済み。" if status == "PASS" else "ページサイズをA4基準に合わせてください。"
-    add_result(
-        results,
-        file_path,
-        "VSD",
-        "C3",
-        COMMON_MARGIN_RULE_TEXT,
-        status,
-        detail,
-        suggested_action,
-    )
-
-    # P1, P2, P3: ページごとのチェック例（仮実装）
-    slide_count = len(prs.slides)
-    for idx, slide in enumerate(prs.slides, start=1):
-        add_result(results, file_path, "PPT", f"P{idx}", f"スライド{idx}内容チェック", "MANUAL", f"スライド{idx}を目検で確認。", "内容を確認。")
-        if idx >= 3:
-            break
-
-    # C4: ページ番号
-    add_result(results, file_path, "PPT", "C4", "ページ番号", "MANUAL", f"スライド数: {slide_count}。 / 指摘対象ページ：目検で確認", "連番整合を目視確認。")
-
-    # C5: PDF出力結果確認
-    add_result(results, file_path, "PPT", "C5", "PDF出力結果確認（見切れ/罫線/表サイズ/ページ番号）", "MANUAL", "PNGで目検。 / 指摘対象ページ：目検で確認", "罫線切れ・表不完全・ページ数を確認。")
-
-    # V1: 印刷範囲外記載チェック
-    add_result(results, file_path, "PPT", "V1", "印刷範囲外記載チェック", "MANUAL", "PPTの印刷範囲外判定は未対応。 / 指摘対象ページ：目検で確認", "PNG化結果を確認してください。")
 
 import argparse
 import hashlib
@@ -323,44 +86,9 @@ MM_PER_INCH = 25.4
 EMUS_PER_INCH = 914400
 EMU_PER_MM = EMUS_PER_INCH / MM_PER_INCH
 COMMON_MARGIN_RULE_TEXT = "余白（A4縦:上20/下20/左30/右20mm以上）"
-RULE_TYPO = "誤字脱字がないか？資料全体において誤字脱字がないか確認する。あった場合は具体的な場所と該当箇所を明示する。"
-RULE_STYLE_UNIFY = "書式、大字の有無、セル結合の使用箇所、文字そろえが全体で統一されており、資料全体の視認性に違和感がないか確認する。"
-RULE_CUSTOMER_SAMA = "資料中の全ての顧客名称（例：国交省、税機構）に「様」が付けられ、統一されているか確認する。"
-RULE_PERIOD_UNIFY = "文末に「。」の有無が資料全体で統一されているか確認する。"
-RULE_FONT_UNIFY = "提出資料全体のフォントが「MS Pゴシック」で統一されており、資料内で他のフォントが使用されていないか確認する。"
-RULE_MEETING_WORDS = "資料内に「全体会議」「個別会議」という文言が残っておらず、資料の文脈で必要ない会議名称が記載されていないか確認する。"
-RULE_VENDOR_TERM = "資料内に「工程管理支援事業者」の誤記が存在せず、正しく「工程管理等支援事業者」が使用されているかを確認する。表記が統一されているかチェックする。"
-RULE_PROJECT_NAME = "プロジェクト名の表記が一致しているか確認する。特に、M6の「自動車登録検査関係システム」に誤った記載がないかをチェックし、正しく「自動車登録検査業務電子情報処理システム」の表記になっているか確認する。"
-RULE_BOKEI_SYSTEM = "冒頭定義がある場合、「本システム」という記載になっているか確認する。"
-RULE_FIG_TABLE_SEQ = "同じ資料内で図の番号や表の番号の整合はとれているか確認する。"
-RULE_BLUE_RGB = "青字を使用している箇所において、明確に原色の青色が使用されているかを確認する。"
-RULE_FILE_TITLE_EMPTY = "ファイルプロパティの「タイトル」が空白になっているか。"
 
-EXCLUDED_CHECK_IDS: Set[str] = {
-    "C2",
-    "G01",
-    "G03",
-    "G06",
-    "G07",
-    "G08",
-    "G09",
-    "G10",
-    "G11",
-    "G12",
-    "G13",
-    "G14",
-    "G15",
-    "G16",
-    "G17",
-    "G19",
-    "DW05",
-}
-
-EXCLUDED_CHECK_ITEMS_NORMALIZED: Set[str] = {
-    "ppt画像化",
-    "ppt画像化",
-    "印刷範囲外記載チェック[課題管理表]",
-}
+EXCLUDED_CHECK_IDS: Set[str] = set()
+EXCLUDED_CHECK_ITEMS_NORMALIZED: Set[str] = set()
 
 
 def normalize_check_item_key(check_item: object) -> str:
@@ -372,33 +100,11 @@ def normalize_check_item_key(check_item: object) -> str:
     return text
 
 
+
 def is_excluded_check(check_id: object = "", check_item: object = "") -> bool:
-    cid = str(check_id or "").strip().upper()
-    if cid in EXCLUDED_CHECK_IDS:
-        return True
-    # 指定ワードでの除外
-    EXCLUDED_KEYWORDS = [
-        "表紙が規定のもの",
-        "共通: 提出資料全体のフォントが「MS Pゴシック」で統一されており、資料内で他のフォントが使用されていないか確認する。",
-        "共通: 青字を使用している箇所において、明確に原色の青色が使用されているかを確認する。",
-        "共通: 誤字脱字がないか？資料全体において誤字脱字がないか確認する。あった場合は具体的な場所と該当箇所を明示する。",
-        "共通: 書式、大字の有無、セル結合の使用箇所、文字そろえが全体で統一されており、資料全体の視認性に違和感がないか確認する。",
-        "共通: 資料中の全ての顧客名称（例：国交省、税機構）に「様」が付けられ、統一されているか確認する。",
-        "共通: 文末に「。」の有無が資料全体で統一されているか確認する。",
-        "共通: 資料内に「全体会議」「個別会議」という文言が残っておらず、資料の文脈で必要ない会議名称が記載されていないか確認する。",
-        "共通: 資料内に「工程管理支援事業者」の誤記が存在せず、正しく「工程管理等支援事業者」が使用されているかを確認する。表記が統一されているかチェックする。",
-        "共通: プロジェクト名の表記が一致しているか確認する。特に、M6の「自動車登録検査関係システム」に誤った記載がないかをチェックし、正しく「自動車登録検査業務電子情報処理システム」の表記になっているか確認する。",
-        "共通: 冒頭定義がある場合、「本システム」という記載になっているか確認する。",
-        "共通: 同じ資料内で図の番号や表の番号の整合はとれているか確認する。",
-        "共通: 記載されている日付が土日祝日や適切でない日付となっていないか確認する。不整合があった場合は具体的な箇所を明示する。",
-        "共通: 資料全体で使用されている赤字、網掛け、黄色マーカ、下線が意味を持ち、有効に活用されているか確認し、不要な書式が残っていないことを確認する。",
-        "共通: 別紙ファイルのファイル名に記載されている別紙番号と別紙内の本文に記載されている別紙番号が一致しているか確認する。文法や表現を統一する。",
-    ]
-    check_item_str = str(check_item or "")
-    for word in EXCLUDED_KEYWORDS:
-        if word in check_item_str:
-            return True
-    return normalize_check_item_key(check_item) in EXCLUDED_CHECK_ITEMS_NORMALIZED
+    """Compatibility hook. Unwanted checks are removed at their generation source."""
+    return False
+
 
 DEFAULT_COVER_KEYWORDS: List[str] = [
     "進捗状況報告",
@@ -410,9 +116,6 @@ DEFAULT_COVER_KEYWORDS: List[str] = [
     "別紙",
 ]
 
-DATE_RULE_ID = "G10"
-DATE_RULE_TEXT = "記載されている日付が土日祝日や適切でない日付となっていないか確認する。不整合があった場合は具体的な箇所を明示する。"
-DATE_YEARS_AHEAD = 5
 
 _JP_HOLIDAY_CACHE: Dict[int, Dict[date, str]] = {}
 _WORD_PAGE_MAP_CACHE: Dict[str, Dict[str, List[int]]] = {}
@@ -447,78 +150,45 @@ class VisualPage:
     sheet_name: str = ""
 
 COMMON_CHECK_ITEMS: List[Tuple[str, str]] = [
+    ("C1", "プロパティ情報削除"),
+    ("C2", "表紙が規定のもの"),
+    ("C3", COMMON_MARGIN_RULE_TEXT),
     ("C4", "ページ番号"),
     ("C5", "PDF出力結果確認（見切れ/罫線/表サイズ/ページ番号）"),
 ]
 
 TYPE_SPECIFIC_CHECK_ITEMS = {
-    "Excel": [],
-    "Word": [],
-    "PDF": [],
-    "LegacyOffice": [("L1", "旧形式ファイル")],
-    # PPT画像化は除外
-}
-
-
-DOMAIN_RULES: Dict[str, List[str]] = {
-    "月間会議計画": [
-        "説明者欄は名前で記載されているか確認する。",
-    ],
-    "進捗報告資料（本紙）": [
-        "進捗状況報告の宿題事項表における未完了列の記載形式が「X(Y)」形式であることを確認する。",
-        "「5.今後の予定」に記載のタスク番号が正しいものか確認する。",
-        "本紙（進捗状況報告）に記載されたWBS番号がEVMファイル内のタスク状態と一致しているか確認する。",
-    ],
-    "本紙/EVM": [
-        "EVMの投入工数パーセンテージが本紙の定量情報と大きくずれていないか確認する。",
-    ],
-    "EVM": [
-        "予定上開始/終了しているタスクについて、実績日付が記載されているか確認する。",
-        "グラフシートの報告期間PV/EV/AC値が前回差分で計算されているか確認する。",
-        "親タスクの予定開始/終了日が子タスクの最小開始/最大終了日に整合しているか確認する。",
-        "グラフシート備考列に修正理由が記載され、吹き出し等非標準方法がないか確認する。",
-        "PV、EV、ACの数値が一致しているか確認する。",
-        "開始/完了作業の実績日が記載されているか確認する。",
-    ],
     "Excel": [
-        "非表示されている内部ワークシートがあるか確認する。",
-        "ファイル共有設定が解除されているか確認する。",
-        "セル幅不足による文字見切れがないか確認する。",
+        ("E1", "印刷範囲外記載チェック"),
+        ("E2", "不要シートチェック"),
+        ("E3", "印刷プレビュー（見切れ/罫線欠け）"),
+        ("E4", "見え消し（取り消し線/訂正線）残存"),
+        ("E5", "コメント（吹き出し）残存"),
+        ("E6", "参照エラー残存"),
+        ("E7", "ページ設定のタイトル行"),
     ],
     "Word": [
-        "図/表番号と内容が同一ページ内に収まっているか確認する。",
-        "図番号と表番号が連番であることを確認する。",
-        "修正履歴・変更履歴の記載内容が本文に反映されているか確認する。",
-        "目次とページ番号の整合性を確認する。",
-        # "不要なブランクページが削除されているか確認する。" ←除外
+        ("W1", "見え消し（変更履歴）残存"),
+        ("W2", "マーカ残存"),
+        ("W3", "不要な文字色"),
+        ("W4", "コメント（吹き出し）残存"),
+        ("W5", "参照エラー残存"),
     ],
-    "マスタースケジュール": [
-        "報告断面を示す実線が正しい位置に配置されているか確認する。",
+    "PDF": [
+        ("P1", "見え消し（注釈ベース）残存"),
+        ("P2", "コメント（吹き出し）残存"),
+        ("P3", "参照エラー残存"),
     ],
-    "マスタスケジュール": [
-        "提出済納入成果物が△→▲へ更新されているか確認する。",
-    ],
-    "リスク管理表": [
-        "対応状況欄がルールどおり（対応無し/未対応は空欄）か確認する。",
-    ],
-    "WBS/マスタースケジュール": [
-        "WBS番号が連番で欠番がないか確認する。",
-    ],
+    "PPT": [],
+    "VISIO": [],
+    "LegacyOffice": [("L1", "旧形式ファイル")],
 }
 
 
-DOMAIN_KEYWORDS: Dict[str, List[str]] = {
-    "月間会議計画": ["月間会議計画"],
-    "進捗報告資料（本紙）": ["進捗", "本紙", "進捗状況報告"],
-    "本紙/EVM": ["evm", "本紙"],
-    "EVM": ["evm"],
-    "Excel": ["excel"],
-    "Word": ["word"],
-    "マスタースケジュール": ["マスタースケジュール"],
-    "マスタスケジュール": ["マスタスケジュール"],
-    "リスク管理表": ["リスク"],
-    "WBS/マスタースケジュール": ["wbs", "マスター"],
-}
+DOMAIN_RULES: Dict[str, List[str]] = {}
+
+
+DOMAIN_KEYWORDS: Dict[str, List[str]] = {}
 
 
 def detect_domains(file_path: Path) -> List[str]:
@@ -530,22 +200,7 @@ def detect_domains(file_path: Path) -> List[str]:
     return domains
 
 
-def build_manual_expected_items(file_path: Path, file_type: str) -> List[Tuple[str, str]]:
-    items: List[Tuple[str, str]] = []
-    for idx, rule in enumerate(COMMON_MANUAL_RULES, start=1):
-        items.append((f"G{idx:02d}", f"共通: {rule}"))
 
-    if file_type in {"Excel", "Word", "PDF", "PPT", "VISIO"}:
-        for idx, rule in enumerate(DOMAIN_RULES.get(file_type, []), start=1):
-            items.append((f"D{file_type[0]}{idx:02d}", f"{file_type}: {rule}"))
-
-    for domain in detect_domains(file_path):
-        rules = DOMAIN_RULES.get(domain, [])
-        for idx, rule in enumerate(rules, start=1):
-            dom = re.sub(r"[^A-Za-z0-9]", "", domain)[:8] or "DOMAIN"
-            items.append((f"K{dom}{idx:02d}", f"{domain}: {rule}"))
-
-    return items
 
 
 def inches_to_mm(value: Optional[float]) -> Optional[float]:
@@ -555,6 +210,144 @@ def inches_to_mm(value: Optional[float]) -> Optional[float]:
         return float(value) * MM_PER_INCH
     except Exception:
         return None
+
+
+def _margin_orientation_label(is_landscape: bool) -> str:
+    return "横" if is_landscape else "縦"
+
+
+def _judge_c3_margin(top: Optional[float], bottom: Optional[float], left: Optional[float], right: Optional[float], is_landscape: bool) -> Tuple[bool, str]:
+    """
+    C3判定:
+      縦設定: 左30mm以上、右・上・下20mm以上
+      横設定: 上30mm以上、左・右・下20mm以上
+    """
+    if None in (top, bottom, left, right):
+        return False, "余白取得不可"
+    if is_landscape:
+        ok = top >= 30 and left >= 20 and right >= 20 and bottom >= 20
+        basis = "横設定: 上30mm以上、左・右・下20mm以上"
+    else:
+        ok = left >= 30 and top >= 20 and right >= 20 and bottom >= 20
+        basis = "縦設定: 左30mm以上、右・上・下20mm以上"
+    label = _margin_orientation_label(is_landscape)
+    judgement = f"{label}設定として判定〇" if ok else f"{label}設定として判定×"
+    return ok, f"上{top:.1f}/下{bottom:.1f}/左{left:.1f}/右{right:.1f}mm / {basis} / {judgement}"
+
+
+def _excel_is_landscape(ws) -> bool:
+    orientation = str(getattr(getattr(ws, "page_setup", None), "orientation", "") or "").lower()
+    if "landscape" in orientation or orientation in {"横", "yoko"}:
+        return True
+    if "portrait" in orientation or orientation in {"縦", "tate"}:
+        return False
+    try:
+        paper_width = getattr(ws.page_setup, "paperWidth", None)
+        paper_height = getattr(ws.page_setup, "paperHeight", None)
+        if paper_width and paper_height:
+            return float(paper_width) > float(paper_height)
+    except Exception:
+        pass
+    return False
+
+
+def _word_is_landscape(section) -> bool:
+    try:
+        width = mm_from_emu(getattr(section, "page_width", None))
+        height = mm_from_emu(getattr(section, "page_height", None))
+        if width is not None and height is not None and width > height:
+            return True
+    except Exception:
+        pass
+    orientation = str(getattr(section, "orientation", "") or "").lower()
+    return "landscape" in orientation or orientation in {"1", "wdorientlandscape", "横"}
+
+
+def _runtime_base_dirs() -> List[Path]:
+    """Windows配布向けに、実行ファイル周辺とPyInstaller展開先を探索する。"""
+    dirs: List[Path] = []
+    try:
+        if getattr(sys, "frozen", False):
+            dirs.append(Path(sys.executable).resolve().parent)
+        dirs.append(Path(__file__).resolve().parent)
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            dirs.append(Path(meipass).resolve())
+    except Exception:
+        pass
+
+    unique: List[Path] = []
+    seen: Set[str] = set()
+    for d in dirs:
+        key = str(d).lower()
+        if key not in seen:
+            unique.append(d)
+            seen.add(key)
+    return unique
+
+
+def _add_aspose_plugin_paths() -> List[str]:
+    """
+    オフラインWindows配布向けのAspose.Diagramプラグイン探索。
+    pip自動導入は行わず、実行ファイル配下の plugins/vendor/lib に配置された
+    aspose パッケージまたは site-packages 相当フォルダを sys.path に追加する。
+    """
+    candidates: List[Path] = []
+    env_dir = os.environ.get("ASPOSE_DIAGRAM_PLUGIN_DIR", "").strip()
+    if env_dir:
+        candidates.append(Path(env_dir))
+
+    for base_dir in _runtime_base_dirs():
+        candidates.extend([
+            base_dir / "plugins" / "aspose_diagram",
+            base_dir / "plugins" / "aspose",
+            base_dir / "plugins",
+            base_dir / "vendor" / "aspose_diagram",
+            base_dir / "vendor" / "aspose",
+            base_dir / "vendor",
+            base_dir / "lib" / "aspose_diagram",
+            base_dir / "lib",
+            base_dir / "_internal" / "plugins" / "aspose_diagram",
+            base_dir / "_internal" / "plugins",
+        ])
+
+    added: List[str] = []
+    for path in candidates:
+        try:
+            if path.exists() and path.is_dir():
+                path_str = str(path.resolve())
+                if path_str not in sys.path:
+                    sys.path.insert(0, path_str)
+                    added.append(path_str)
+        except Exception:
+            continue
+    return added
+
+
+def ensure_aspose_diagram_available(auto_install: bool = False) -> Tuple[bool, str]:
+    """
+    Aspose.Diagramを利用可能にする。
+    オフライン・Python未導入PCでの配布を想定し、pip installは行わない。
+    配布時は exe と同階層の plugins\aspose_diagram などに aspose パッケージを配置する。
+    """
+    try:
+        import aspose.diagram  # type: ignore
+        return True, "Aspose.Diagram 利用可能"
+    except Exception as first_exc:
+        added = _add_aspose_plugin_paths()
+        try:
+            import importlib
+            importlib.invalidate_caches()
+            import aspose.diagram  # type: ignore
+            return True, "Aspose.Diagram プラグインを読み込みました。"
+        except Exception as plugin_exc:
+            hint = (
+                "Aspose.Diagram プラグイン未配置または読み込み不可。"
+                "exeと同じフォルダ配下の plugins\\aspose_diagram に aspose パッケージ一式を配置してください。"
+            )
+            if added:
+                hint += f" 探索済み={'; '.join(added[:3])}"
+            return False, f"{hint} import_error={first_exc}; plugin_error={plugin_exc}"
 
 
 def add_result(
@@ -773,29 +566,49 @@ def _build_property_detail(fields: List[Tuple[str, object]]) -> Tuple[bool, str]
 
 
 
-def ensure_expected_checks(results: List[CheckResult], file_path: Path, file_type: str) -> None:
+
+def ensure_expected_checks(
+
+    results: List[CheckResult],
+
+    file_path: Path,
+
+    file_type: str,
+
+) -> None:
+
     target = str(file_path)
+
     present_ids = {r.check_id for r in results if r.file_path == target}
 
-    # --- 廃止されたチェックのみ除外 ---
-    REMOVE_CHECK_IDS = {
-        "G19",
-    }
-
     expected = TYPE_SPECIFIC_CHECK_ITEMS.get(file_type, []) + COMMON_CHECK_ITEMS
+
     for check_id, check_item in expected:
-        if check_id in present_ids or check_id in REMOVE_CHECK_IDS:
+
+        if check_id in present_ids:
+
             continue
+
         add_result(
+
             results,
+
             file_path,
+
             file_type,
+
             check_id,
+
             check_item,
-            "MANUAL",
-            "自動判定対象外です。 /対象ページ：目検で確認",
-            "目視で確認し、必要に応じて修正してください。",
+
+            "N/A",
+
+            "このファイルでは自動判定未対応、または判定対象外です。",
+
+            "必要に応じて手動確認してください。",
+
         )
+
 
 
 def slugify_for_path(path: Path) -> str:
@@ -869,6 +682,9 @@ def convert_office_to_pdf(input_path: Path, output_pdf: Path) -> Optional[str]:
 
 
 def convert_visio_to_pdf_via_aspose(input_path: Path, output_pdf: Path) -> Optional[str]:
+    ok, msg = ensure_aspose_diagram_available(auto_install=False)
+    if not ok:
+        return f"Aspose.Diagram を利用できません(Python {sys.version_info.major}.{sys.version_info.minor}): {msg}"
     try:
         from aspose.diagram import Diagram, SaveFileFormat
     except Exception as exc:
@@ -915,14 +731,12 @@ def convert_visio_to_pdf_via_com(input_path: Path, output_pdf: Path) -> Optional
 
 
 def find_soffice_path() -> Optional[str]:
-    import shutil
-
     candidates = [
-        shutil.which("soffice"),
-        shutil.which("soffice.exe"),
-        shutil.which("soffice.com"),
+        os.environ.get("SOFFICE_PATH", ""),
         r"C:\Program Files\LibreOffice\program\soffice.com",
         r"C:\Program Files\LibreOffice\program\soffice.exe",
+        r"C:\Program Files (x86)\LibreOffice\program\soffice.com",
+        r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
     ]
     for candidate in candidates:
         if candidate and Path(candidate).exists():
@@ -1506,7 +1320,7 @@ def run_visual_pipeline(
             "VISIO→PNG変換",
             "MANUAL",
             f"{detail} Visio for Web(Graph API)による変換にはMicrosoftアカウント認証が必要です。",
-            "Python 3.13以下で aspose-diagram-python を導入するか、Visio/LibreOffice を利用してください。",
+            "Aspose.Diagramプラグイン、Visio、またはLibreOffice環境を確認してください。",
         )
         return None
 
@@ -2089,6 +1903,23 @@ def summarize_pages(page_labels: List[str], limit: int = 8) -> str:
         return "指摘対象ページ：" + ", ".join(shown) + f" ほか{rest}件"
     return "指摘対象ページ：" + ", ".join(shown)
 
+def summarize_locations(locations: List[str], limit: int = 8) -> str:
+
+    if not locations:
+
+        return ""
+
+    shown = locations[:limit]
+
+    rest = len(locations) - len(shown)
+
+    if rest > 0:
+
+        return ", ".join(shown) + f" ほか{rest}件"
+
+    return ", ".join(shown)
+
+
 
 def _to_ascii_digits(text: str) -> str:
     trans = str.maketrans("０１２３４５６７８９", "0123456789")
@@ -2332,6 +2163,9 @@ def extract_pdf_text_pages(reader) -> List[Tuple[str, str]]:
 
 
 def load_visio_diagram_via_aspose(file_path: Path):
+    ok, msg = ensure_aspose_diagram_available(auto_install=False)
+    if not ok:
+        return None, f"Aspose.Diagram を利用できません(Python {sys.version_info.major}.{sys.version_info.minor}): {msg}"
     try:
         from aspose.diagram import Diagram
     except Exception as exc:
@@ -2421,10 +2255,45 @@ def summarize_visio_custom_props(custom_props) -> List[str]:
     return summaries
 
 
+def check_ppt(file_path: Path, results: List[CheckResult], cover_keyword: Optional[str]) -> None:
+    """PPT/PPTX basic checks. Detailed layout is confirmed through image_preview."""
+    try:
+        from pptx import Presentation
+    except ImportError:
+        add_result(results, file_path, "PPT", "P-ENV", "PPT解析ライブラリ", "ERROR", "python-pptx が未インストール。", "pip install python-pptx")
+        return
+
+    try:
+        prs = Presentation(str(file_path))
+    except Exception as exc:
+        add_result(results, file_path, "PPT", "P-OPEN", "PPTファイル読込", "ERROR", f"読込失敗: {exc}", "ファイル状態確認。")
+        return
+
+    props = prs.core_properties
+    has_props = any([
+        props.title, props.subject, props.keywords, props.category,
+        props.author, props.last_modified_by, props.comments
+    ])
+    props_detail = (
+        f"タイトル: {props.title}, 件名: {props.subject}, キーワード: {props.keywords}, "
+        f"分類: {props.category}, 作成者: {props.author}, 管理者: {props.last_modified_by}, コメント: {props.comments}"
+    )
+    add_result(results, file_path, "PPT", "C1", "プロパティ情報削除", "FAIL" if has_props else "PASS", props_detail, "不要プロパティを削除。" if has_props else "対応不要。")
+
+    slide_text = "\n".join(shape.text for slide in prs.slides for shape in slide.shapes if getattr(shape, "has_text_frame", False))[:3000]
+    c2_status, c2_detail, c2_action = evaluate_cover(slide_text, cover_keyword)
+    add_result(results, file_path, "PPT", "C2", "表紙が規定のもの", c2_status, c2_detail, c2_action)
+
+    add_result(results, file_path, "PPT", "C3", COMMON_MARGIN_RULE_TEXT, "N/A", "PPTはページ余白を安定取得できないため対象外。画像シートでレイアウトを確認してください。", "対応不要。")
+    slide_count = len(prs.slides)
+    add_result(results, file_path, "PPT", "C4", "ページ番号", "MANUAL", f"スライド数: {slide_count}。 / 指摘対象ページ：目検で確認", "連番整合を目視確認。")
+    add_result(results, file_path, "PPT", "C5", "PDF出力結果確認（見切れ/罫線/表サイズ/ページ番号）", "MANUAL", "別シートPNGで目検。 / 指摘対象ページ：目検で確認", "罫線切れ・表不完全・ページ数を確認。")
+
+
 def check_visio(file_path: Path, results: List[CheckResult], cover_keyword: Optional[str]) -> None:
     diagram, err = load_visio_diagram_via_aspose(file_path)
     if diagram is None:
-        add_result(results, file_path, "VISIO", "V-ENV", "VISIO解析ライブラリ", "WARN", err or "Aspose.Diagram を利用できません。", "Python 3.13以下の環境で aspose-diagram-python を導入してください。")
+        add_result(results, file_path, "VISIO", "V-ENV", "VISIO解析ライブラリ", "WARN", err or "Aspose.Diagram を利用できません。", "Aspose.Diagramプラグイン、Visio、またはLibreOffice環境を確認してください。")
         return
 
     props = getattr(diagram, "document_props", None)
@@ -2444,10 +2313,9 @@ def check_visio(file_path: Path, results: List[CheckResult], cover_keyword: Opti
     add_result(results, file_path, "VISIO", "C1", "プロパティ情報削除", "FAIL" if has_props else "PASS", props_detail, "不要プロパティを削除。" if has_props else "対応不要。")
 
     text_pages = extract_visio_text_pages(diagram)
-    if not is_excluded_check("C2", "表紙が規定のもの"):
-        first_page_text = "\n".join(text for text, page in text_pages if page == "P1")[:3000]
-        c2_status, c2_detail, c2_action = evaluate_cover(first_page_text, cover_keyword)
-        add_result(results, file_path, "VISIO", "C2", "表紙が規定のもの", c2_status, c2_detail, c2_action)
+    first_page_text = "\n".join(text for text, page in text_pages if page == "P1")[:3000]
+    c2_status, c2_detail, c2_action = evaluate_cover(first_page_text, cover_keyword)
+    add_result(results, file_path, "VISIO", "C2", "表紙が規定のもの", c2_status, c2_detail, c2_action)
 
     add_result(results, file_path, "VISIO", "C3", COMMON_MARGIN_RULE_TEXT, "N/A", "余白チェックは対象外。", "対応不要。")
 
@@ -2494,44 +2362,8 @@ def check_visio(file_path: Path, results: List[CheckResult], cover_keyword: Opti
     )
     add_result(results, file_path, "VISIO", "V6", "参照エラー残存", "FAIL" if ref_error_pages else "PASS", (f"参照エラー文字列を検出。 / {summarize_pages(ref_error_pages)}" if ref_error_pages else "参照エラー文字列なし。 / 指摘対象ページ：なし"), "参照元を修正してください。" if ref_error_pages else "対応不要。")
 
-    maybe_add_or_replace_result(
-        results,
-        file_path,
-        "DV01",
-        "VISIO",
-        "VISIO: ハイパーリンク付き図形が残っていないか確認する。",
-        "WARN" if hyperlink_pages else "PASS",
-        (f"ハイパーリンク付き図形を検出。 / {summarize_pages(hyperlink_pages)}" if hyperlink_pages else "ハイパーリンク付き図形は検出されません。 / 指摘対象ページ：なし"),
-        "不要なハイパーリンクを確認してください。" if hyperlink_pages else "対応不要。",
-    )
-
-    custom_prop_summaries = summarize_visio_custom_props(custom_props) if custom_props is not None else []
-    maybe_add_or_replace_result(
-        results,
-        file_path,
-        "DV02",
-        "VISIO",
-        "VISIO: カスタムプロパティが残っていないか確認する。",
-        "WARN" if custom_prop_summaries else "PASS",
-        (f"カスタムプロパティを検出。 / {', '.join(custom_prop_summaries[:5])}" + (f" ほか{len(custom_prop_summaries) - 5}件" if len(custom_prop_summaries) > 5 else "") if custom_prop_summaries else "カスタムプロパティは検出されません。"),
-        "不要なカスタムプロパティを削除してください。" if custom_prop_summaries else "対応不要。",
-    )
-
-    title_text = str(getattr(props, "title", "") or "").strip() if props is not None else ""
-    if not is_excluded_check("G19", f"共通: {RULE_FILE_TITLE_EMPTY}"):
-        add_result(results, file_path, "VISIO", "G19", f"共通: {RULE_FILE_TITLE_EMPTY}", "PASS" if not title_text else "FAIL", ("タイトルは空白です。" if not title_text else "ファイルタイトルが設定されています。"), "タイトルを空白にしてください。" if title_text else "対応不要。")
-    run_language_consistency_checks(results, file_path, "VISIO", text_pages)
-    run_common_textual_auto_checks(results, file_path, "VISIO", text_pages)
-    run_date_consistency_check(results, file_path, "VISIO", text_pages)
 
 
-def run_date_consistency_check(
-    results: List[CheckResult],
-    file_path: Path,
-    file_type: str,
-    text_pages: List[Tuple[str, str]],
-) -> None:
-    return
 
 
 def run_language_consistency_checks(
@@ -2543,13 +2375,7 @@ def run_language_consistency_checks(
     return
 
 
-def run_common_textual_auto_checks(
-    results: List[CheckResult],
-    file_path: Path,
-    file_type: str,
-    text_pages: List[Tuple[str, str]],
-) -> None:
-    return
+
 
 
 def mm_from_emu(value) -> Optional[float]:
@@ -2750,532 +2576,1601 @@ def color_is_blue_excel(cell) -> bool:
     return False
 
 
-def maybe_add_or_replace_result(results: List[CheckResult], file_path: Path, check_id: str, file_type: str, check_item: str, status: str, detail: str, action: str) -> None:
-    target = str(file_path)
-    if is_excluded_check(check_id, check_item):
-        results[:] = [r for r in results if not (r.file_path == target and r.check_id == check_id)]
-        return
-    for i, r in enumerate(results):
-        if r.file_path == target and r.check_id == check_id:
-            results[i] = CheckResult(target, file_type, check_id, check_item, status, detail, action)
-            return
-    add_result(results, file_path, file_type, check_id, check_item, status, detail, action)
 
 
-def scan_excel_font_and_blue_and_domains(file_path: Path, wb, results: List[CheckResult], text_pages: List[Tuple[str, str]]) -> None:
-    domains = detect_domains(file_path)
-    non_mp_pages: List[str] = []
-    blue_ng_pages: List[str] = []
-    hidden_sheets: List[str] = []
-    speaker_ng_pages: List[str] = []
-    x_y_ng_pages: List[str] = []
-    wbs_seq_all: List[int] = []
-    wbs_seq_pages: List[str] = []
-    share_flag = bool(getattr(getattr(wb, "properties", None), "contentStatus", None) == "Shared")
-
-    for ws in wb.worksheets:
-        if getattr(ws, "sheet_state", "visible") != "visible":
-            hidden_sheets.append(ws.title)
-        row_break_ids = extract_excel_break_ids(getattr(ws, "row_breaks", None))
-        col_break_ids = extract_excel_break_ids(getattr(ws, "col_breaks", None))
-        header_map: Dict[str, int] = {}
-        try:
-            for c in range(1, min(ws.max_column, 40) + 1):
-                v = ws.cell(1, c).value
-                if isinstance(v, str) and v.strip():
-                    header_map[normalize_text(v)] = c
-        except Exception:
-            header_map = {}
-
-        skip_font_check = is_excluded_check("G09", f"共通: {RULE_FONT_UNIFY}")
-        skip_blue_check = is_excluded_check("G17", f"共通: {RULE_BLUE_RGB}")
-
-        for row_idx, col_idx, cell in iter_nonempty_cells(ws):
-            page_label = infer_excel_print_page_from_breaks(row_break_ids, col_break_ids, row_idx, col_idx)
-            if not skip_font_check:
-                font_name = str(getattr(getattr(cell, "font", None), "name", "") or "").strip()
-                if font_name and font_name.lower() not in {"ms pゴシック", "ms pgothic"}:
-                    non_mp_pages.append(page_label)
-            if not skip_blue_check and color_is_blue_excel(cell):
-                pure = color_is_pure_blue_excel(cell)
-                if pure is False:
-                    blue_ng_pages.append(page_label)
-
-            val = cell.value
-            if isinstance(val, str):
-                for m in re.finditer(r"\b(\d+)\b", _to_ascii_digits(val)):
-                    pass
-
-        # 説明者欄
-        speaker_col = None
-        for k, v in header_map.items():
-            if "説明者" in k:
-                speaker_col = v
-                break
-        if speaker_col:
-            for r in range(2, (ws.max_row or 1) + 1):
-                val = ws.cell(r, speaker_col).value
-                if val is None:
-                    continue
-                s = normalize_text(str(val))
-                if not s:
-                    continue
-                if not is_probable_person_name(s):
-                    page_label = infer_excel_print_page_from_breaks(row_break_ids, col_break_ids, r, speaker_col)
-                    speaker_ng_pages.append(page_label)
-
-        # 宿題事項表 未完了列 X(Y)
-        target_col = None
-        for k, v in header_map.items():
-            if "未完了" in k:
-                target_col = v
-                break
-        if target_col:
-            for r in range(2, (ws.max_row or 1) + 1):
-                val = ws.cell(r, target_col).value
-                if val is None:
-                    continue
-                s = normalize_text(str(val))
-                if not s:
-                    continue
-                if not re.fullmatch(r"\d+\(\d+\)", _to_ascii_digits(s)):
-                    page_label = infer_excel_print_page_from_breaks(row_break_ids, col_break_ids, r, target_col)
-                    x_y_ng_pages.append(page_label)
-
-        # WBS連番（単純系）
-        for row_idx, col_idx, cell in iter_nonempty_cells(ws):
-            if isinstance(cell.value, str):
-                t = _to_ascii_digits(cell.value)
-                for m in re.finditer(r"\bWBS\s*[:：]?\s*(\d+)\b", t, flags=re.IGNORECASE):
-                    wbs_seq_all.append(int(m.group(1)))
-                    wbs_seq_pages.append(infer_excel_print_page_from_breaks(row_break_ids, col_break_ids, row_idx, col_idx))
-
-    maybe_add_or_replace_result(
-        results, file_path, "G09", "Excel", f"共通: {RULE_FONT_UNIFY}",
-        "FAIL" if non_mp_pages else "PASS",
-        (f"MS Pゴシック以外のフォント候補を検出。 / {summarize_pages(non_mp_pages)}" if non_mp_pages else "フォントはMS Pゴシックで概ね統一されています。 / 指摘対象ページ：なし"),
-        "フォントをMS Pゴシックへ統一してください。" if non_mp_pages else "対応不要。"
-    )
-    maybe_add_or_replace_result(
-        results, file_path, "G17", "Excel", f"共通: {RULE_BLUE_RGB}",
-        "FAIL" if blue_ng_pages else "PASS",
-        (f"原色青以外の青字候補を検出。 / {summarize_pages(blue_ng_pages)}" if blue_ng_pages else "青字は原色青として検出されるか、青字自体がありません。 / 指摘対象ページ：なし"),
-        "青字色コードを見直してください。" if blue_ng_pages else "対応不要。"
-    )
-    maybe_add_or_replace_result(
-        results, file_path, "DE01", "Excel", "Excel: 非表示されている内部ワークシートがあるか確認する。",
-        "FAIL" if hidden_sheets else "PASS",
-        (f"非表示シートを検出: {', '.join(hidden_sheets[:10])}" if hidden_sheets else "非表示シートは検出されません。"),
-        "不要なら表示または削除してください。" if hidden_sheets else "対応不要。"
-    )
-    maybe_add_or_replace_result(
-        results, file_path, "DE03", "Excel", "Excel: ファイル共有設定が解除されているか確認する。",
-        "FAIL" if share_flag else "PASS",
-        ("共有設定の可能性あり。" if share_flag else "共有設定の明確な痕跡は検出されません。"),
-        "共有設定を確認し解除してください。" if share_flag else "対応不要。"
-    )
-
-    if "月間会議計画" in domains:
-        maybe_add_or_replace_result(
-            results, file_path, "K01NAME", "Excel", "月間会議計画: 説明者欄は名前で記載されているか確認する。",
-            "FAIL" if speaker_ng_pages else "PASS",
-            (f"人名以外の説明者候補を検出。 / {summarize_pages(speaker_ng_pages)}" if speaker_ng_pages else "説明者欄は人名らしい記載です。 / 指摘対象ページ：なし"),
-            "説明者欄を人名表記へ修正してください。" if speaker_ng_pages else "対応不要。"
-        )
-
-    if "進捗報告資料（本紙）" in domains:
-        maybe_add_or_replace_result(
-            results, file_path, "K01XY", "Excel", "進捗報告資料（本紙）: 進捗状況報告の宿題事項表における未完了列の記載形式が「X(Y)」形式であることを確認する。",
-            "FAIL" if x_y_ng_pages else "PASS",
-            (f"X(Y)形式でない候補を検出。 / {summarize_pages(x_y_ng_pages)}" if x_y_ng_pages else "未完了列はX(Y)形式で記載されています。 / 指摘対象ページ：なし"),
-            "未完了列をX(Y)形式へ修正してください。" if x_y_ng_pages else "対応不要。"
-        )
-
-    if "WBS/マスタースケジュール" in domains or "進捗報告資料（本紙）" in domains:
-        missing = get_missing_sequence(wbs_seq_all)
-        maybe_add_or_replace_result(
-            results, file_path, "K01WBS", "Excel", "WBS/マスタースケジュール: WBS番号が連番で欠番がないか確認する。",
-            "FAIL" if missing else ("PASS" if wbs_seq_all else "WARN"),
-            (f"WBS欠番={missing[:10]} / {summarize_pages(wbs_seq_pages)}" if missing else ("WBS番号に明確な欠番は検出されません。 / 指摘対象ページ：なし" if wbs_seq_all else "WBS連番を自動抽出できませんでした。 / 指摘対象ページ：目検で確認")),
-            "WBS番号の欠番・重複を確認してください。" if (missing or not wbs_seq_all) else "対応不要。"
-        )
 
 
-def scan_word_font_blue_blank_domains(file_path: Path, doc, results: List[CheckResult], text_pages: List[Tuple[str, str]]) -> None:
-    return
+
+
+
+
 
 
 def check_excel(file_path: Path, results: List[CheckResult]) -> None:
+
     if load_workbook is None:
-        add_result(results, file_path, "Excel", "E-ENV", "Excel解析ライブラリ", "ERROR", "openpyxl が未インストール。", "pip install openpyxl")
+
+        add_result(
+
+            results,
+
+            file_path,
+
+            "Excel",
+
+            "E-ENV",
+
+            "Excel解析ライブラリ",
+
+            "ERROR",
+
+            "openpyxl が未インストールのため解析できません。",
+
+            "pip install openpyxl を実行してください。",
+
+        )
+
         return
 
+ 
+
     try:
+
         with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", message=r"(?i)cannot parse header or footer so it will be ignored", category=UserWarning)
+
+            warnings.filterwarnings(
+
+                "ignore",
+
+                message=r"(?i)cannot parse header or footer so it will be ignored",
+
+                category=UserWarning,
+
+            )
+
             wb = load_workbook(file_path, data_only=False)
+
     except Exception as exc:
-        add_result(results, file_path, "Excel", "E-OPEN", "Excelファイル読込", "ERROR", f"読込失敗: {exc}", "ファイル状態確認。")
+
+        add_result(
+
+            results,
+
+            file_path,
+
+            "Excel",
+
+            "E-OPEN",
+
+            "Excelファイル読込",
+
+            "ERROR",
+
+            f"読込失敗: {exc}",
+
+            "ファイル破損・パスワード保護の有無を確認してください。",
+
+        )
+
         return
+
+ 
 
     all_formula_refs = collect_formula_refs_excel(wb)
-    style_counts_by_sheet: Dict[str, Dict[str, int]] = {}
+
+ 
 
     strike_cells = 0
+
     comment_cells = 0
+
+    strike_locations: List[str] = []
+
+    comment_locations: List[str] = []
+
+    ref_error_locations: List[str] = []
+
     strike_pages: List[str] = []
+
     comment_pages: List[str] = []
+
     ref_error_pages: List[str] = []
-    text_pages: List[Tuple[str, str]] = []
+
+    missing_print_title_rows_sheets: List[str] = []
+
+ 
+
+    ref_error_tokens = {
+
+        "#REF!",
+
+        "#NAME?",
+
+        "#VALUE!",
+
+        "#DIV/0!",
+
+        "#NUM!",
+
+        "#NULL!",
+
+        "#N/A",
+
+    }
+
+ 
 
     for ws in wb.worksheets:
-        style_counts = {"red": 0, "shaded": 0, "yellow": 0, "underline": 0}
-        style_counts_by_sheet[ws.title] = style_counts
-        print_ranges = parse_print_area_ranges(ws)
-        row_break_ids = extract_excel_break_ids(getattr(ws, "row_breaks", None))
-        col_break_ids = extract_excel_break_ids(getattr(ws, "col_breaks", None))
-        outside_pages: List[str] = []
-        outside_ref_pages: List[str] = []
-        outside_count = 0
 
-        skip_style_check = is_excluded_check("G01", "共通: 資料全体で使用されている赤字、網掛け、黄色マーカ、下線が意味を持ち、有効に活用されているか確認し、不要な書式が残っていないことを確認する。")
+        print_title_rows = getattr(ws, "print_title_rows", None)
+
+        if isinstance(print_title_rows, str) and print_title_rows.strip():
+
+            pass
+
+        else:
+
+            missing_print_title_rows_sheets.append(ws.title)
+
+ 
+
+        print_ranges = parse_print_area_ranges(ws)
+
+        row_break_ids = extract_excel_break_ids(getattr(ws, "row_breaks", None))
+
+        col_break_ids = extract_excel_break_ids(getattr(ws, "col_breaks", None))
+
+        outside_cells: List[str] = []
+
+        outside_locations: List[str] = []
+
+        outside_referenced_locations: List[str] = []
+
+        outside_pages: List[str] = []
+
+        outside_referenced_pages: List[str] = []
+
+ 
 
         for row_idx, col_idx, cell in iter_nonempty_cells(ws):
-            coord = f"{get_column_letter(col_idx)}{row_idx}"
+
             page_label = infer_excel_print_page_from_breaks(row_break_ids, col_break_ids, row_idx, col_idx)
-            if not skip_style_check:
-                if is_excel_red_font(cell):
-                    style_counts["red"] += 1
-                if is_excel_shaded(cell):
-                    style_counts["shaded"] += 1
-                if is_excel_yellow_fill(cell):
-                    style_counts["yellow"] += 1
-                if is_excel_underlined(cell):
-                    style_counts["underline"] += 1
-            if isinstance(cell.value, str) and cell.value.strip():
-                text_pages.append((cell.value, page_label))
+
+            coord = f"{get_column_letter(col_idx)}{row_idx}"
+
+            loc = f"{ws.title}!{coord}({page_label})"
+
+ 
 
             if bool(getattr(getattr(cell, "font", None), "strike", False)):
+
                 strike_cells += 1
+
+                strike_locations.append(loc)
+
                 strike_pages.append(page_label)
+
             if getattr(cell, "comment", None) is not None:
+
                 comment_cells += 1
+
+                comment_locations.append(loc)
+
                 comment_pages.append(page_label)
 
+ 
+
             cell_text = str(cell.value).upper() if isinstance(cell.value, str) else ""
-            if (isinstance(cell.value, str) and cell.value.startswith("=") and "#REF!" in cell_text) or cell_text in {
-                "#REF!", "#NAME?", "#VALUE!", "#DIV/0!", "#NUM!", "#NULL!", "#N/A"
-            }:
+
+            if (isinstance(cell.value, str) and cell.value.startswith("=") and "#REF!" in cell_text) or (
+
+                cell_text in ref_error_tokens
+
+            ):
+
+                ref_error_locations.append(loc)
+
                 ref_error_pages.append(page_label)
 
+ 
+
             if print_ranges and (not coord_in_ranges(coord, print_ranges)):
-                outside_count += 1
+
+                outside_cells.append(coord)
+
+                outside_locations.append(loc)
+
                 outside_pages.append(page_label)
+
                 if coord in all_formula_refs:
-                    outside_ref_pages.append(page_label)
+
+                    outside_referenced_locations.append(loc)
+
+                    outside_referenced_pages.append(page_label)
+
+ 
 
         if not print_ranges:
-            add_result(results, file_path, "Excel", "E1", f"印刷範囲外記載チェック [{ws.title}]", "WARN", "印刷範囲未設定。 / 指摘対象ページ：特定不可(印刷範囲未設定)", "印刷範囲設定後に再確認。")
-        elif outside_count > 0:
+
             add_result(
+
                 results,
+
                 file_path,
+
                 "Excel",
+
                 "E1",
+
                 f"印刷範囲外記載チェック [{ws.title}]",
-                "FAIL",
-                f"印刷範囲外セル {outside_count} 件。 / {summarize_pages(outside_pages)}"
-                + (f" / 参照あり: {summarize_pages(outside_ref_pages)}" if outside_ref_pages else ""),
-                "印刷範囲・参照整合を修正。",
+
+                "WARN",
+
+                "印刷範囲が未設定のため、自動判定できません。 / 指摘対象ページ：特定不可(印刷範囲未設定)",
+
+                "必要なら印刷範囲を設定し、再チェックしてください。",
+
             )
-        else:
-            add_result(results, file_path, "Excel", "E1", f"印刷範囲外記載チェック [{ws.title}]", "PASS", "印刷範囲外記載なし。 / 指摘対象ページ：なし", "対応不要。")
 
-    style_hit_total = 0
-    style_sheet_details: List[str] = []
-    for sheet_name, counts in style_counts_by_sheet.items():
-        sheet_total = counts["red"] + counts["shaded"] + counts["yellow"] + counts["underline"]
-        style_hit_total += sheet_total
-        if sheet_total == 0:
             continue
-        style_sheet_details.append(
-            f"{sheet_name}(赤字={counts['red']}, 網掛け={counts['shaded']}, 黄色マーカ={counts['yellow']}, 下線={counts['underline']})"
-        )
 
-    if style_sheet_details:
-        add_result(
-            results,
-            file_path,
-            "Excel",
-            "G01",
-            "共通: 資料全体で使用されている赤字、網掛け、黄色マーカ、下線が意味を持ち、有効に活用されているか確認し、不要な書式が残っていないことを確認する。",
-            "WARN",
-            f"装飾を検出（合計={style_hit_total}件）。 / シート別: {'; '.join(style_sheet_details[:8])}"
-            + (f" / ほか{len(style_sheet_details)-8}シート" if len(style_sheet_details) > 8 else ""),
-            "装飾の意図（必要/不要）を目視確認してください。",
-        )
-    else:
-        add_result(
-            results,
-            file_path,
-            "Excel",
-            "G01",
-            "共通: 資料全体で使用されている赤字、網掛け、黄色マーカ、下線が意味を持ち、有効に活用されているか確認し、不要な書式が残っていないことを確認する。",
-            "PASS",
-            "赤字/網掛け/黄色マーカ/下線は検出されません。 / 指摘対象ページ：なし",
-            "対応不要。",
-        )
+ 
 
-    add_result(results, file_path, "Excel", "E2", "不要シートチェック", "MANUAL", "対象シート一覧を確認。 / 指摘対象ページ：目検で確認", "不要シートを整理。")
-    add_result(results, file_path, "Excel", "E3", "印刷プレビュー（見切れ/罫線欠け）", "MANUAL", "印刷プレビューで目検。 / 指摘対象ページ：目検で確認", "見切れ/罫線欠けを補正。")
-    add_result(results, file_path, "Excel", "E4", "見え消し（取り消し線/訂正線）残存", "FAIL" if strike_cells else "PASS", f"取り消し線セル: {strike_cells} 件。 / {summarize_pages(strike_pages)}", "不要な取り消し線を解除。" if strike_cells else "対応不要。")
-    add_result(results, file_path, "Excel", "E5", "コメント（吹き出し）残存", "FAIL" if comment_cells else "PASS", f"コメント付きセル: {comment_cells} 件。 / {summarize_pages(comment_pages)}", "不要コメントを削除。" if comment_cells else "対応不要。")
-    add_result(results, file_path, "Excel", "E6", "参照エラー残存", "FAIL" if ref_error_pages else "PASS", (f"参照エラー検出。 / {summarize_pages(ref_error_pages)}" if ref_error_pages else "参照エラーなし。 / 指摘対象ページ：なし"), "参照式を修正。" if ref_error_pages else "対応不要。")
+        if outside_cells:
+
+            add_result(
+
+                results,
+
+                file_path,
+
+                "Excel",
+
+                "E1",
+
+                f"印刷範囲外記載チェック [{ws.title}]",
+
+                "FAIL",
+
+                (
+
+                    f"印刷範囲外セル {len(outside_cells)} 件（うち参照あり {len(outside_referenced_locations)} 件）。"
+
+                    f" / {summarize_pages(outside_pages)}"
+
+                    f" / 該当セル: {summarize_locations(outside_locations)}"
+
+                    + (
+
+                        f" / 参照ありセル: {summarize_locations(outside_referenced_locations)} / {summarize_pages(outside_referenced_pages)}"
+
+                        if outside_referenced_locations
+
+                        else ""
+
+                    )
+
+                ),
+
+                "必要なら印刷範囲拡大、不要かつ未参照なら削除、参照ありは残置を検討。",
+
+            )
+
+        else:
+
+            add_result(
+
+                results,
+
+                file_path,
+
+                "Excel",
+
+                "E1",
+
+                f"印刷範囲外記載チェック [{ws.title}]",
+
+                "PASS",
+
+                "印刷範囲外の記載は検出されませんでした。 / 指摘対象ページ：なし",
+
+                "対応不要。",
+
+            )
+
+ 
+
+    all_sheet_names = [ws.title for ws in wb.worksheets]
+
+    add_result(
+
+        results,
+
+        file_path,
+
+        "Excel",
+
+        "E2",
+
+        "不要シートチェック",
+
+        "MANUAL",
+
+        f"対象シート: {', '.join(all_sheet_names)}",
+
+        "不要シート有無は対象シート一覧をもとに手動確認。",
+
+    )
+
+ 
+
+    add_result(
+
+        results,
+
+        file_path,
+
+        "Excel",
+
+        "E3",
+
+        "印刷プレビュー（見切れ/罫線欠け）",
+
+        "MANUAL",
+
+        "プレビュー見切れ・罫線欠けは自動判定が難しいため目視確認が必要です。",
+
+        "Excelで印刷プレビューを開き、見切れや罫線欠けを補正。",
+
+    )
+
+ 
+
+    add_result(
+
+        results,
+
+        file_path,
+
+        "Excel",
+
+        "E4",
+
+        "見え消し（取り消し線/訂正線）残存",
+
+        "FAIL" if strike_cells > 0 else "PASS",
+
+        (
+
+            f"取り消し線セル: {strike_cells} 件。 / {summarize_pages(strike_pages)} / 該当セル: {summarize_locations(strike_locations)}"
+
+            if strike_cells > 0
+
+            else "取り消し線セル: 0 件。 / 指摘対象ページ：なし"
+
+        ),
+
+        "不要な取り消し線を解除。" if strike_cells > 0 else "対応不要。",
+
+    )
+
+ 
+
+    add_result(
+
+        results,
+
+        file_path,
+
+        "Excel",
+
+        "E5",
+
+        "コメント（吹き出し）残存",
+
+        "FAIL" if comment_cells > 0 else "PASS",
+
+        (
+
+            f"コメント付きセル: {comment_cells} 件。 / {summarize_pages(comment_pages)} / 該当セル: {summarize_locations(comment_locations)}"
+
+            if comment_cells > 0
+
+            else "コメント付きセル: 0 件。 / 指摘対象ページ：なし"
+
+        ),
+
+        "不要なコメント/メモを削除。" if comment_cells > 0 else "対応不要。",
+
+    )
+
+ 
+
+    add_result(
+
+        results,
+
+        file_path,
+
+        "Excel",
+
+        "E6",
+
+        "参照エラー残存",
+
+        "FAIL" if ref_error_locations else "PASS",
+
+        (
+
+            f"参照エラー/数式エラーセル: {len(ref_error_locations)} 件。 / {summarize_pages(ref_error_pages)} / 該当セル: {summarize_locations(ref_error_locations)}"
+
+            if ref_error_locations
+
+            else "参照エラー/数式エラーセルは検出されません。 / 指摘対象ページ：なし"
+
+        ),
+
+        "該当セルの数式参照先を修正。" if ref_error_locations else "対応不要。",
+
+    )
+
+ 
+
+    add_result(
+
+        results,
+
+        file_path,
+
+        "Excel",
+
+        "E7",
+
+        "ページ設定のタイトル行",
+
+        "FAIL" if missing_print_title_rows_sheets else "PASS",
+
+        (
+
+            "タイトル行が未設定のシートがあります: " + ", ".join(missing_print_title_rows_sheets)
+
+            if missing_print_title_rows_sheets
+
+            else "全シートでタイトル行が設定されています。"
+
+        ),
+
+        "ページ設定のタイトル行（先頭行）を設定してください。"
+
+        if missing_print_title_rows_sheets
+
+        else "対応不要。",
+
+    )
+
+ 
 
     cp = wb.properties
-    has_props, props_detail = _build_property_detail(
+
+    has_props = any(
+
         [
-            ("タイトル", cp.title),
-            ("件名", cp.subject),
-            ("タグ", cp.keywords),
-            ("分類", cp.category),
-            ("作成者", cp.creator),
-            ("前回保存者", cp.lastModifiedBy),
-            ("改訂番号", cp.revision),
-            ("バージョン番号", cp.version),
+
+            cp.creator,
+
+            cp.lastModifiedBy,
+
+            cp.title,
+
+            cp.subject,
+
+            cp.keywords,
+
+            cp.description,
+
+            cp.category,
+
+            cp.contentStatus,
+
         ]
+
     )
-    add_result(results, file_path, "Excel", "C1", "プロパティ情報削除", "FAIL" if has_props else "PASS", props_detail, "不要プロパティを削除。" if has_props else "対応不要。")
-    if not is_excluded_check("C2", "表紙が規定のもの"):
-        add_result(results, file_path, "Excel", "C2", "表紙が規定のもの", "MANUAL", "規定表紙照合は目検。 / 指摘対象ページ：目検で確認", "表紙テンプレート照合。")
-    check_excel_margin(file_path, results, wb)
-    add_result(results, file_path, "Excel", "C4", "ページ番号", "MANUAL", "ヘッダ/フッタのページ番号整合は目検。 / 指摘対象ページ：目検で確認", "ページ番号連番を確認。")
-    add_result(results, file_path, "Excel", "C5", "PDF出力結果確認（見切れ/罫線/表サイズ/ページ番号）", "MANUAL", "別シートPNGで目検。 / 指摘対象ページ：目検で確認", "罫線切れ・表不完全・ページ数を確認。")
-    if not is_excluded_check("G19", f"共通: {RULE_FILE_TITLE_EMPTY}"):
-        add_result(results, file_path, "Excel", "G19", f"共通: {RULE_FILE_TITLE_EMPTY}", "PASS" if not (cp.title or "").strip() else "FAIL", ("タイトルは空白です。" if not (cp.title or "").strip() else "ファイルタイトルが設定されています。"), "タイトルを空白にしてください。" if (cp.title or "").strip() else "対応不要。")
-    run_language_consistency_checks(results, file_path, "Excel", text_pages)
-    run_common_textual_auto_checks(results, file_path, "Excel", text_pages)
-    run_date_consistency_check(results, file_path, "Excel", text_pages)
-    scan_excel_font_and_blue_and_domains(file_path, wb, results, text_pages)
+
+    add_result(
+
+        results,
+
+        file_path,
+
+        "Excel",
+
+        "C1",
+
+        "プロパティ情報削除",
+
+        "FAIL" if has_props else "PASS",
+
+        "プロパティ情報が残っています。" if has_props else "主要プロパティは空です。",
+
+        "ファイル情報のプロパティを削除。" if has_props else "対応不要。",
+
+    )
+
+ 
+
+    add_result(
+
+        results,
+
+        file_path,
+
+        "Excel",
+
+        "C2",
+
+        "表紙が規定のもの",
+
+        "MANUAL",
+
+        "規定表紙判定は基準データが必要なため手動確認です。",
+
+        "規定表紙テンプレートと照合。",
+
+    )
+
+ 
+
+    margin_msgs = []
+    margin_fail = False
+    for ws in wb.worksheets:
+        pm = ws.page_margins
+        top = inches_to_mm(getattr(pm, "top", None))
+        bottom = inches_to_mm(getattr(pm, "bottom", None))
+        left = inches_to_mm(getattr(pm, "left", None))
+        right = inches_to_mm(getattr(pm, "right", None))
+        is_landscape = _excel_is_landscape(ws)
+        ok, msg = _judge_c3_margin(top, bottom, left, right, is_landscape)
+        margin_msgs.append(f"{ws.title}({msg})")
+        if not ok:
+            margin_fail = True
+
+    add_result(
+        results,
+        file_path,
+        "Excel",
+        "C3",
+        COMMON_MARGIN_RULE_TEXT,
+        "FAIL" if margin_fail else "PASS",
+        "; ".join(margin_msgs),
+        "ページ設定で余白を補正。" if margin_fail else "設定値確認済み。",
+    )
+
+    add_result(
+        results,
+        file_path,
+        "Excel",
+        "C4",
+
+        "ページ番号",
+
+        "MANUAL",
+
+        "Excelヘッダ/フッタのページ番号形式は目視確認を推奨。最大ページ数は画像シート参照。",
+
+        "印刷プレビューまたはページ設定で確認。",
+
+    )
+
+ 
+
+    add_result(
+
+        results,
+
+        file_path,
+
+        "Excel",
+
+        "C5",
+
+        "PDF出力結果確認（見切れ/罫線/表サイズ/ページ番号）",
+
+        "MANUAL",
+
+        "PDF出力後の品質確認は目視が必要です。",
+
+        "PDFを開き、見切れ・罫線欠け・表サイズ・ページ番号を確認。",
+
+    )
+
+ 
+
     try:
+
         wb.close()
+
     except Exception:
+
         pass
 
 
+
+
 def check_word(file_path: Path, results: List[CheckResult], cover_keyword: Optional[str]) -> None:
+
     if Document is None:
-        add_result(results, file_path, "Word", "W-ENV", "Word解析ライブラリ", "ERROR", "python-docx が未インストール。", "pip install python-docx")
+
+        add_result(
+
+            results,
+
+            file_path,
+
+            "Word",
+
+            "W-ENV",
+
+            "Word解析ライブラリ",
+
+            "ERROR",
+
+            "python-docx が未インストールのため解析できません。",
+
+            "pip install python-docx を実行してください。",
+
+        )
+
         return
+
+ 
 
     try:
+
         doc = Document(file_path)
+
     except Exception as exc:
-        add_result(results, file_path, "Word", "W-OPEN", "Wordファイル読込", "ERROR", f"読込失敗: {exc}", "ファイル状態確認。")
+
+        add_result(
+
+            results,
+
+            file_path,
+
+            "Word",
+
+            "W-OPEN",
+
+            "Wordファイル読込",
+
+            "ERROR",
+
+            f"読込失敗: {exc}",
+
+            "ファイル破損・保護設定を確認してください。",
+
+        )
+
         return
 
+ 
+
     doc_xml = doc.element.xml
+
     settings_xml = doc.settings.element.xml if getattr(doc, "settings", None) is not None else ""
-    revision_count = sum(len(re.findall(p, doc_xml)) for p in [r"<w:ins\b", r"<w:del\b", r"<w:moveFrom\b", r"<w:moveTo\b"])
+
+    revision_patterns = [r"<w:ins\\b", r"<w:del\\b", r"<w:moveFrom\\b", r"<w:moveTo\\b"]
+
+    revision_count = sum(len(re.findall(p, doc_xml)) for p in revision_patterns)
+
     track_revisions_on = "w:trackRevisions" in settings_xml
+
     strike_count = 0
+
     double_strike_count = 0
+
     highlighted_runs = 0
+
     colored_runs = 0
+
     strike_snippets: List[str] = []
+
     highlight_snippets: List[str] = []
+
     colored_snippets: List[str] = []
+
     ref_error_snippets: List[str] = []
-    word_text_blocks: List[str] = []
+
     for run in iter_word_runs(doc):
+
         run_text = normalize_word_snippet(getattr(run, "text", ""))
+
         if bool(getattr(run.font, "strike", False)):
+
             strike_count += 1
+
             if run_text:
+
                 strike_snippets.append(run_text)
+
         if bool(getattr(run.font, "double_strike", False)):
+
             double_strike_count += 1
+
             if run_text:
+
                 strike_snippets.append(run_text)
+
         if run.font.highlight_color is not None:
+
             highlighted_runs += 1
+
             if run_text:
+
                 highlight_snippets.append(run_text)
+
         if run.font.color is not None and run.font.color.rgb is not None:
+
             colored_runs += 1
+
             if run_text:
+
                 colored_snippets.append(run_text)
 
-    for p in doc.paragraphs:
-        if p.text and p.text.strip():
-            word_text_blocks.append(p.text)
+ 
+
+    has_track_changes = revision_count > 0 or track_revisions_on
+
+    has_miekeshi = has_track_changes or (strike_count + double_strike_count) > 0
+
+    add_result(
+
+        results,
+
+        file_path,
+
+        "Word",
+
+        "W1",
+
+        "見え消し（変更履歴）残存",
+
+        "FAIL" if has_miekeshi else "PASS",
+
+        (
+
+            f"変更履歴要素={revision_count}, trackRevisions={track_revisions_on}, 取り消し線Run={strike_count}, 二重取り消し線Run={double_strike_count}。 / 指摘対象ページ：特定不可(Wordレイアウト依存)"
+
+            if has_miekeshi
+
+            else "見え消し（変更履歴/取り消し線/二重取り消し線）は検出されません。 / 指摘対象ページ：なし"
+
+        ),
+
+        "最新版確認後、変更履歴を承諾/破棄し、取り消し線を解消。" if has_miekeshi else "対応不要。",
+
+    )
+
+ 
+
+    add_result(
+
+        results,
+
+        file_path,
+
+        "Word",
+
+        "W2",
+
+        "マーカ残存",
+
+        "FAIL" if highlighted_runs > 0 else "PASS",
+
+        (
+
+            f"ハイライト付きRun: {highlighted_runs} 件。 / 指摘対象ページ：特定不可(Wordレイアウト依存)"
+
+            if highlighted_runs > 0
+
+            else "ハイライト付きRun: 0 件。 / 指摘対象ページ：なし"
+
+        ),
+
+        "最新版確認後、不要マーカを削除。" if highlighted_runs > 0 else "対応不要。",
+
+    )
+
+ 
+
+    add_result(
+
+        results,
+
+        file_path,
+
+        "Word",
+
+        "W3",
+
+        "不要な文字色",
+
+        "WARN" if colored_runs > 0 else "PASS",
+
+        (
+
+            f"明示的な文字色付きRun: {colored_runs} 件。 / 指摘対象ページ：特定不可(Wordレイアウト依存)"
+
+            if colored_runs > 0
+
+            else "明示的な文字色付きRun: 0 件。 / 指摘対象ページ：なし"
+
+        ),
+
+        "不要な色がないことを最終確認し、色付き箇所は標準色へ修正。",
+
+    )
+
+ 
+
+    comment_anchor_count = len(re.findall(r"<w:commentRangeStart\\b", doc_xml)) + len(
+
+        re.findall(r"<w:commentReference\\b", doc_xml)
+
+    )
+
+    has_comment_part = any("/comments.xml" in str(p.partname) for p in doc.part.package.parts)
+
+    has_comments = comment_anchor_count > 0 or has_comment_part
+
+    add_result(
+
+        results,
+
+        file_path,
+
+        "Word",
+
+        "W4",
+
+        "コメント（吹き出し）残存",
+
+        "FAIL" if has_comments else "PASS",
+
+        (
+
+            f"コメント参照を検出（anchor={comment_anchor_count}, comments.xml={has_comment_part}）。 / 指摘対象ページ：特定不可(Wordレイアウト依存)"
+
+            if has_comments
+
+            else "コメント（吹き出し）は検出されません。 / 指摘対象ページ：なし"
+
+        ),
+
+        "不要なコメントを削除し、最終版で吹き出し非表示を確認。" if has_comments else "対応不要。",
+
+    )
+
+ 
+
+    word_text_blocks = [p.text for p in doc.paragraphs if p.text]
+
     for table in doc.tables:
+
         for row in table.rows:
+
             for cell in row.cells:
+
                 for p in cell.paragraphs:
-                    if p.text and p.text.strip():
+
+                    if p.text:
+
                         word_text_blocks.append(p.text)
 
+    ref_error_pattern = re.compile(r"(?i)(error!\s*reference source not found\.?|#ref!)")
+
+    word_ref_hits = 0
+
     for t in word_text_blocks:
-        if re.search(r"(?i)(error!\s*reference source not found\.?|#ref!)", t):
+
+        if ref_error_pattern.search(t):
+
+            word_ref_hits += 1
+
             ref_error_snippets.append(normalize_word_snippet(t))
 
+ 
+
     all_lookup_snippets = strike_snippets + highlight_snippets + colored_snippets + ref_error_snippets
-    word_page_map = find_word_text_page_numbers(file_path, all_lookup_snippets, max_snippets=120)
+
+    word_page_map = find_word_text_page_numbers(file_path, all_lookup_snippets)
+
     w1_pages = collect_pages_from_snippets(strike_snippets, word_page_map)
+
     w2_pages = collect_pages_from_snippets(highlight_snippets, word_page_map)
+
     w3_pages = collect_pages_from_snippets(colored_snippets, word_page_map)
+
     w5_pages = collect_pages_from_snippets(ref_error_snippets, word_page_map)
 
-    has_miekeshi = (revision_count > 0) or track_revisions_on or (strike_count + double_strike_count > 0)
-    add_result(results, file_path, "Word", "W1", "見え消し（変更履歴）残存", "FAIL" if has_miekeshi else "PASS", (f"変更履歴/取り消し線を検出。 / {summarize_pages(w1_pages) if w1_pages else '指摘対象ページ：特定不可(Wordレイアウト依存)'}" if has_miekeshi else "見え消しなし。 / 指摘対象ページ：なし"), "変更履歴承諾/破棄、取り消し線解除。" if has_miekeshi else "対応不要。")
-    add_result(results, file_path, "Word", "W2", "マーカ残存", "FAIL" if highlighted_runs else "PASS", (f"ハイライト付きRun: {highlighted_runs}。 / {summarize_pages(w2_pages) if w2_pages else '指摘対象ページ：特定不可(Wordレイアウト依存)'}" if highlighted_runs else "ハイライトなし。 / 指摘対象ページ：なし"), "不要マーカを削除。" if highlighted_runs else "対応不要。")
-    add_result(results, file_path, "Word", "W3", "不要な文字色", "WARN" if colored_runs else "PASS", (f"色付きRun: {colored_runs}。 / {summarize_pages(w3_pages) if w3_pages else '指摘対象ページ：特定不可(Wordレイアウト依存)'}" if colored_runs else "色付きRunなし。 / 指摘対象ページ：なし"), "不要な色を修正。")
+    add_result(
 
-    comment_anchor_count = len(re.findall(r"<w:commentRangeStart\b", doc_xml)) + len(re.findall(r"<w:commentReference\b", doc_xml))
-    has_comment_part = any("/comments.xml" in str(p.partname) for p in doc.part.package.parts)
-    has_comments = comment_anchor_count > 0 or has_comment_part
-    add_result(results, file_path, "Word", "W4", "コメント（吹き出し）残存", "FAIL" if has_comments else "PASS", ("コメント参照を検出。 / 指摘対象ページ：特定不可(Wordレイアウト依存)" if has_comments else "コメントなし。 / 指摘対象ページ：なし"), "不要コメント削除。" if has_comments else "対応不要。")
+        results,
 
-    word_ref_hits = sum(1 for t in word_text_blocks if re.search(r"(?i)(error!\s*reference source not found\.?|#ref!)", t))
-    add_result(results, file_path, "Word", "W5", "参照エラー残存", "FAIL" if word_ref_hits else "PASS", (f"参照エラー文字列 {word_ref_hits} 件。 / {summarize_pages(w5_pages) if w5_pages else '指摘対象ページ：特定不可(Wordレイアウト依存)'}" if word_ref_hits else "参照エラーなし。 / 指摘対象ページ：なし"), "相互参照/番号を修正。" if word_ref_hits else "対応不要。")
+        file_path,
+
+        "Word",
+
+        "W5",
+
+        "参照エラー残存",
+
+        "FAIL" if word_ref_hits > 0 else "PASS",
+
+        (
+
+            f"参照エラー文字列を {word_ref_hits} 件検出。 / 指摘対象ページ：特定不可(Wordレイアウト依存)"
+
+            if word_ref_hits > 0
+
+            else "参照エラー文字列は検出されません。 / 指摘対象ページ：なし"
+
+        ),
+
+        "参照元(相互参照・図表番号・ブックマーク)を再設定。" if word_ref_hits > 0 else "対応不要。",
+
+    )
+
+ 
 
     cp = doc.core_properties
-    has_props, props_detail = _build_property_detail(
+
+    has_props = any(
+
         [
-            ("タイトル", cp.title),
-            ("件名", cp.subject),
-            ("タグ", cp.keywords),
-            ("分類", cp.category),
-            ("作成者", cp.author),
-            ("前回保存者", cp.last_modified_by),
-            ("改訂番号", cp.revision),
-            ("バージョン番号", cp.version),
+
+            cp.author,
+
+            cp.last_modified_by,
+
+            cp.title,
+
+            cp.subject,
+
+            cp.keywords,
+
+            cp.comments,
+
+            cp.category,
+
         ]
+
     )
-    add_result(results, file_path, "Word", "C1", "プロパティ情報削除", "FAIL" if has_props else "PASS", props_detail, "不要プロパティ削除。" if has_props else "対応不要。")
 
-    first_page_text = "\n".join(p.text for p in doc.paragraphs[:20])
-    c2_status, c2_detail, c2_action = evaluate_cover(first_page_text, cover_keyword)
-    add_result(results, file_path, "Word", "C2", "表紙が規定のもの", c2_status, c2_detail, c2_action)
+    add_result(
 
-    check_word_margin(file_path, results, doc)
+        results,
 
-    header_footer_xml = "\n".join(sec.header._element.xml + sec.footer._element.xml for sec in doc.sections)
-    has_page_number_field = ("PAGE" in header_footer_xml) or ("w:pgNum" in header_footer_xml)
-    add_result(results, file_path, "Word", "C4", "ページ番号", "PASS" if has_page_number_field else "WARN", ("ページ番号フィールドを検出。 / 指摘対象ページ：全体" if has_page_number_field else "ページ番号フィールド未検出。 / 指摘対象ページ：目検で確認"), "ヘッダ/フッタにページ番号設定。" if not has_page_number_field else "対応不要。")
-    add_result(results, file_path, "Word", "C5", "PDF出力結果確認（見切れ/罫線/表サイズ/ページ番号）", "MANUAL", "別シートPNGで目検。 / 指摘対象ページ：目検で確認", "罫線切れ・表不完全・ページ数を確認。")
-    add_result(results, file_path, "Word", "G19", f"共通: {RULE_FILE_TITLE_EMPTY}", "PASS" if not (cp.title or "").strip() else "FAIL", ("タイトルは空白です。" if not (cp.title or "").strip() else "ファイルタイトルが設定されています。"), "タイトルを空白にしてください。" if (cp.title or "").strip() else "対応不要。")
+        file_path,
 
-    text_pages = extract_word_text_pages(doc, file_path)
-    run_language_consistency_checks(results, file_path, "Word", text_pages)
-    run_common_textual_auto_checks(results, file_path, "Word", text_pages)
-    run_date_consistency_check(results, file_path, "Word", text_pages)
-    scan_word_font_blue_blank_domains(file_path, doc, results, text_pages)
+        "Word",
+
+        "C1",
+
+        "プロパティ情報削除",
+
+        "FAIL" if has_props else "PASS",
+
+        "プロパティ情報が残っています。" if has_props else "主要プロパティは空です。",
+
+        "ファイル情報のプロパティを削除。" if has_props else "対応不要。",
+
+    )
+
+ 
+
+    if cover_keyword:
+
+        first_page_text = "\n".join(p.text for p in doc.paragraphs[:20])
+
+        cover_ok = cover_keyword in first_page_text
+
+        add_result(
+
+            results,
+
+            file_path,
+
+            "Word",
+
+            "C2",
+
+            "表紙が規定のもの",
+
+            "PASS" if cover_ok else "FAIL",
+
+            f"表紙キーワード '{cover_keyword}' を " + ("検出。" if cover_ok else "未検出。"),
+
+            "規定の表紙へ差し替え。" if not cover_ok else "対応不要。",
+
+        )
+
+    else:
+
+        add_result(
+
+            results,
+
+            file_path,
+
+            "Word",
+
+            "C2",
+
+            "表紙が規定のもの",
+
+            "MANUAL",
+
+            "cover keyword 未指定のため手動確認です。",
+
+            "--cover-keyword を指定すると半自動確認できます。",
+
+        )
+
+ 
+
+    margin_fail_msgs = []
+    margin_ok_msgs = []
+    for idx, section in enumerate(doc.sections, start=1):
+        top = mm_from_emu(section.top_margin)
+        bottom = mm_from_emu(section.bottom_margin)
+        left = mm_from_emu(section.left_margin)
+        right = mm_from_emu(section.right_margin)
+        is_landscape = _word_is_landscape(section)
+        ok, msg = _judge_c3_margin(top, bottom, left, right, is_landscape)
+        full_msg = f"sec{idx}({msg})"
+        if ok:
+            margin_ok_msgs.append(full_msg)
+        else:
+            margin_fail_msgs.append(full_msg)
+
+    add_result(
+        results,
+        file_path,
+        "Word",
+        "C3",
+        COMMON_MARGIN_RULE_TEXT,
+        "FAIL" if margin_fail_msgs else "PASS",
+        "; ".join(margin_fail_msgs if margin_fail_msgs else margin_ok_msgs),
+        "ページ設定で余白を補正。" if margin_fail_msgs else "対応不要。",
+    )
+
+    add_result(
+        results,
+        file_path,
+        "Word",
+        "C4",
+
+        "ページ番号",
+
+        "PASS" if has_page_number_field else "WARN",
+
+        "ページ番号フィールドを検出。" if has_page_number_field else "ページ番号フィールドを検出できません。最大ページ数は画像シート参照。",
+
+        "ヘッダ/フッタにページ番号を設定。" if not has_page_number_field else "対応不要。",
+
+    )
+
+ 
+
+    add_result(
+
+        results,
+
+        file_path,
+
+        "Word",
+
+        "C5",
+
+        "PDF出力結果確認（見切れ/罫線/表サイズ/ページ番号）",
+
+        "MANUAL",
+
+        "PDF出力後の品質確認は目視が必要です。",
+
+        "PDFを開き、見切れ・罫線欠け・表サイズ・ページ番号を確認。",
+
+    )
+
+ 
+
+    package = getattr(getattr(doc, "part", None), "package", None)
+
+    close_fn = getattr(package, "close", None)
+
+    if callable(close_fn):
+
+        try:
+
+            close_fn()
+
+        except Exception:
+
+            pass
+
+
 
 
 def check_pdf(file_path: Path, results: List[CheckResult], cover_keyword: Optional[str]) -> None:
+
     if PdfReader is None:
-        add_result(results, file_path, "PDF", "P-ENV", "PDF解析ライブラリ", "ERROR", "pypdf が未インストール。", "pip install pypdf")
+
+        add_result(
+
+            results,
+
+            file_path,
+
+            "PDF",
+
+            "P-ENV",
+
+            "PDF解析ライブラリ",
+
+            "ERROR",
+
+            "pypdf が未インストールのため解析できません。",
+
+            "pip install pypdf を実行してください。"
+
+        )
+
         return
+
+ 
 
     try:
+
         reader = PdfReader(str(file_path))
+
     except Exception as exc:
-        add_result(results, file_path, "PDF", "P-OPEN", "PDFファイル読込", "ERROR", f"読込失敗: {exc}", "暗号化/破損確認。")
+
+        add_result(
+
+            results,
+
+            file_path,
+
+            "PDF",
+
+            "P-OPEN",
+
+            "PDFファイル読込",
+
+            "ERROR",
+
+            f"読込失敗: {exc}",
+
+            "ファイル破損・パスワード・権限制限を確認してください。"
+
+        )
+
         return
 
+ 
+
     metadata = reader.metadata or {}
-    has_meta, props_detail = _build_property_detail(
-        [
-            ("タイトル", metadata.get("/Title")),
-            ("件名", metadata.get("/Subject")),
-            ("タグ", metadata.get("/Keywords")),
-            ("分類", metadata.get("/Category")),
-            ("作成者", metadata.get("/Author")),
-            ("前回保存者", metadata.get("/Creator")),
-            ("改訂番号", metadata.get("/Revision")),
-            ("バージョン番号", metadata.get("/Version") or metadata.get("/PDFVersion")),
-        ]
+
+    meaningful_meta = []
+
+    for key in ["/Author", "/Creator", "/Producer", "/Title", "/Subject", "/Keywords"]:
+
+        val = metadata.get(key)
+
+        if val:
+
+            meaningful_meta.append(f"{key}={val}")
+
+ 
+
+    add_result(
+
+        results,
+
+        file_path,
+
+        "PDF",
+
+        "C1",
+
+        "プロパティ情報削除",
+
+        "FAIL" if meaningful_meta else "PASS",
+
+        "; ".join(meaningful_meta) if meaningful_meta else "主要メタデータは空です。",
+
+        "PDF作成時にメタデータ削除して再出力。" if meaningful_meta else "対応不要。"
+
     )
-    add_result(results, file_path, "PDF", "C1", "プロパティ情報削除", "FAIL" if has_meta else "PASS", props_detail, "不要メタデータを削除。" if has_meta else "対応不要。")
 
-    first_text = ""
-    if reader.pages:
-        try:
-            first_text = (reader.pages[0].extract_text() or "")[:3000]
-        except Exception:
-            first_text = ""
-    c2_status, c2_detail, c2_action = evaluate_cover(first_text, cover_keyword)
-    add_result(results, file_path, "PDF", "C2", "表紙が規定のもの", c2_status, c2_detail, c2_action)
+ 
 
-    check_pdf_margin(file_path, results, reader)
+    if cover_keyword and reader.pages:
 
-    strikeout_annots = 0
-    comment_annots = 0
-    other_markup_annots = 0
-    strike_pages: List[int] = []
-    comment_pages: List[int] = []
-    markup_pages: List[int] = []
-    ref_error_pages: List[int] = []
-    text_pages: List[Tuple[str, str]] = []
+        first_text = (reader.pages[0].extract_text() or "")[:3000]
 
-    for page_index, page in enumerate(reader.pages, start=1):
-        try:
-            page_text = page.extract_text() or ""
-        except Exception:
-            page_text = ""
-        if page_text.strip():
-            text_pages.append((page_text, f"P{page_index}"))
-        if re.search(r"(?i)(error!\s*reference source not found\.?|#ref!)", page_text):
-            ref_error_pages.append(page_index)
+        cover_ok = cover_keyword in first_text
 
-        annots = page.get("/Annots")
-        if not annots:
-            continue
-        for annot_ref in annots:
-            try:
-                annot = annot_ref.get_object()
-            except Exception:
-                continue
-            subtype = annot.get("/Subtype")
-            if subtype == "/StrikeOut":
-                strikeout_annots += 1
-                strike_pages.append(page_index)
-            elif subtype in {"/Text", "/FreeText", "/Popup"}:
-                comment_annots += 1
-                comment_pages.append(page_index)
-            elif subtype in {"/Underline", "/Squiggly", "/Highlight", "/Caret"}:
-                other_markup_annots += 1
-                markup_pages.append(page_index)
+        add_result(
 
-    if strikeout_annots + other_markup_annots > 0:
-        pages = ", ".join(f"P{p}" for p in sorted(set(strike_pages + markup_pages)))
-        add_result(results, file_path, "PDF", "P1", "見え消し（注釈ベース）残存", "FAIL", f"注釈検出。 / 指摘対象ページ：{pages}", "不要注釈を削除。")
+            results,
+
+            file_path,
+
+            "PDF",
+
+            "C2",
+
+            "表紙が規定のもの",
+
+            "PASS" if cover_ok else "FAIL",
+
+            f"表紙キーワード '{cover_keyword}' を " + ("検出。" if cover_ok else "未検出。"),
+
+            "規定の表紙へ差し替え。" if not cover_ok else "対応不要。"
+
+        )
+
     else:
-        add_result(results, file_path, "PDF", "P1", "見え消し（注釈ベース）残存", "PASS", "見え消し注釈なし。 / 指摘対象ページ：なし", "対応不要。")
 
-    if comment_annots > 0:
-        pages = ", ".join(f"P{p}" for p in sorted(set(comment_pages)))
-        add_result(results, file_path, "PDF", "P2", "コメント（吹き出し）残存", "FAIL", f"コメント注釈検出。 / 指摘対象ページ：{pages}", "不要コメント注釈を削除。")
-    else:
-        add_result(results, file_path, "PDF", "P2", "コメント（吹き出し）残存", "PASS", "コメント注釈なし。 / 指摘対象ページ：なし", "対応不要。")
+        add_result(
 
-    if ref_error_pages:
-        pages = ", ".join(f"P{p}" for p in sorted(set(ref_error_pages)))
-        add_result(results, file_path, "PDF", "P3", "参照エラー残存", "FAIL", f"参照エラー文字列を検出。 / 指摘対象ページ：{pages}", "参照元修正後に再出力。")
-    else:
-        add_result(results, file_path, "PDF", "P3", "参照エラー残存", "PASS", "参照エラー文字列なし。 / 指摘対象ページ：なし", "対応不要。")
+            results,
+
+            file_path,
+
+            "PDF",
+
+            "C2",
+
+            "表紙が規定のもの",
+
+            "MANUAL",
+
+            "cover keyword 未指定または1ページ目取得不可のため手動確認です。",
+
+            "--cover-keyword を指定すると半自動確認できます。",
+
+        )
+
+ 
+
+    add_result(
+
+        results,
+
+        file_path,
+
+        "PDF",
+
+        "C3",
+
+        COMMON_MARGIN_RULE_TEXT,
+
+        "MANUAL",
+
+        "PDFはレイアウト固定で余白の厳密自動判定が難しいため手動確認です（基準: 上20/下20/左30/右20mm以上）。",
+
+        "表示倍率100%で余白とパンチ穴干渉を確認。",
+
+    )
+
+ 
 
     page_count = len(reader.pages)
-    add_result(results, file_path, "PDF", "C4", "ページ番号", "MANUAL", f"ページ数: {page_count}。 / 指摘対象ページ：目検で確認", "連番整合を目視確認。")
-    add_result(results, file_path, "PDF", "C5", "PDF出力結果確認（見切れ/罫線/表サイズ/ページ番号）", "MANUAL", "別シートPNGで目検。 / 指摘対象ページ：目検で確認", "罫線切れ・表不完全・ページ数を確認。")
-    add_result(results, file_path, "PDF", "G09", f"共通: {RULE_FONT_UNIFY}", "MANUAL", "PDFからフォント名の安定抽出は未対応。 / 指摘対象ページ：目検で確認", "必要に応じて元ファイルで確認してください。")
-    add_result(results, file_path, "PDF", "G17", f"共通: {RULE_BLUE_RGB}", "MANUAL", "PDFから色コードの安定抽出は未対応。 / 指摘対象ページ：目検で確認", "必要に応じて元ファイルで確認してください。")
-    add_result(results, file_path, "PDF", "G19", f"共通: {RULE_FILE_TITLE_EMPTY}", "PASS" if not str(metadata.get('/Title') or '').strip() else "FAIL", ("タイトルは空白です。" if not str(metadata.get('/Title') or '').strip() else "ファイルタイトルが設定されています。"), "タイトルを空白にしてください。" if str(metadata.get('/Title') or '').strip() else "対応不要。")
-    run_language_consistency_checks(results, file_path, "PDF", text_pages)
-    run_common_textual_auto_checks(results, file_path, "PDF", text_pages)
-    run_date_consistency_check(results, file_path, "PDF", text_pages)
+
+    strikeout_annots = 0
+
+    comment_annots = 0
+
+    other_markup_annots = 0
+
+    strike_pages: List[int] = []
+
+    comment_pages: List[int] = []
+
+    markup_pages: List[int] = []
+
+    ref_error_pages: List[int] = []
+
+    ref_error_pattern = re.compile(r"(?i)(error!\s*reference source not found\.?|#ref!)")
+
+    for page_index, page in enumerate(reader.pages, start=1):
+
+        try:
+
+            page_text = page.extract_text() or ""
+
+        except Exception:
+
+            page_text = ""
+
+        if ref_error_pattern.search(page_text):
+
+            ref_error_pages.append(page_index)
+
+ 
+
+        annots = page.get("/Annots")
+
+        if not annots:
+
+            continue
+
+        for annot_ref in annots:
+
+            try:
+
+                annot = annot_ref.get_object()
+
+            except Exception:
+
+                continue
+
+            subtype = annot.get("/Subtype")
+
+            if subtype == "/StrikeOut":
+
+                strikeout_annots += 1
+
+                strike_pages.append(page_index)
+
+            elif subtype in {"/Text", "/FreeText", "/Popup"}:
+
+                comment_annots += 1
+
+                comment_pages.append(page_index)
+
+            elif subtype in {"/Underline", "/Squiggly", "/Highlight", "/Caret"}:
+
+                other_markup_annots += 1
+
+                markup_pages.append(page_index)
+
+ 
+
+    add_result(
+
+        results,
+
+        file_path,
+
+        "PDF",
+
+        "P1",
+
+        "見え消し（注釈ベース）残存",
+
+        "FAIL" if (strikeout_annots + other_markup_annots) > 0 else "PASS",
+
+        (
+
+            f"注釈検出: StrikeOut={strikeout_annots}, その他マークアップ={other_markup_annots}。 / 指摘対象ページ：{', '.join(f'P{p}' for p in sorted(set(strike_pages + markup_pages)))}"
+
+            if (strikeout_annots + other_markup_annots) > 0
+
+            else "注釈ベースの見え消しは検出されません。 / 指摘対象ページ：なし"
+
+        ),
+
+        "不要な注釈を削除。テキストに焼き込まれた取り消し線は目視確認。"
+
+        if (strikeout_annots + other_markup_annots) > 0
+
+        else "対応不要。",
+
+    )
+
+ 
+
+    add_result(
+
+        results,
+
+        file_path,
+
+        "PDF",
+
+        "P2",
+
+        "コメント（吹き出し）残存",
+
+        "FAIL" if comment_annots > 0 else "PASS",
+
+        (
+
+            f"コメント系注釈: {comment_annots} 件。 / 指摘対象ページ：{', '.join(f'P{p}' for p in sorted(set(comment_pages)))}"
+
+            if comment_annots > 0
+
+            else "コメント系注釈: 0 件。 / 指摘対象ページ：なし"
+
+        ),
+
+        "不要なコメント注釈を削除。" if comment_annots > 0 else "対応不要。",
+
+    )
+
+ 
+
+    add_result(
+
+        results,
+
+        file_path,
+
+        "PDF",
+
+        "P3",
+
+        "参照エラー残存",
+
+        "FAIL" if ref_error_pages else "PASS",
+
+        (
+
+            f"参照エラー文字列を検出。 / 指摘対象ページ：{', '.join(f'P{p}' for p in sorted(set(ref_error_pages)))}"
+
+            if ref_error_pages
+
+            else "参照エラー文字列は検出されません。 / 指摘対象ページ：なし"
+
+        ),
+
+        "参照元を修正し、PDF再出力。" if ref_error_pages else "対応不要。",
+
+    )
+
+ 
+
+    add_result(
+
+        results,
+
+        file_path,
+
+        "PDF",
+
+        "C4",
+
+        "ページ番号",
+
+        "MANUAL",
+
+        f"ページ数: {page_count}。抽出品質の都合でページ番号整合は手動確認を推奨。",
+
+        "全ページのページ番号連番を確認。",
+
+    )
+
+ 
+
+    add_result(
+
+        results,
+
+        file_path,
+
+        "PDF",
+
+        "C5",
+
+        "PDF出力結果確認（見切れ/罫線/表サイズ/ページ番号）",
+
+        "MANUAL",
+
+        "PDF品質確認の総合判定は目視が必要です。詳細は C5.1?C5.4 を参照。",
+
+        "C5.1?C5.4 を確認して総合判断。",
+
+    )
+
+ 
+
+    add_result(
+
+        results,
+
+        file_path,
+
+        "PDF",
+
+        "C5.1",
+
+        "PDF見切れ",
+
+        "MANUAL",
+
+        "見切れは表示環境依存のため目視確認が必要です。",
+
+        "各ページ端部の文字欠けを確認。",
+
+    )
+
+    add_result(
+
+        results,
+
+        file_path,
+
+        "PDF",
+
+        "C5.2",
+
+        "PDF罫線欠け",
+
+        "MANUAL",
+
+        "罫線欠けの判定は目視確認が必要です。",
+
+        "細線・表罫線の欠けを確認。",
+
+    )
+
+    add_result(
+
+        results,
+
+        file_path,
+
+        "PDF",
+
+        "C5.3",
+
+        "PDF表サイズ極小",
+
+        "MANUAL",
+
+        "表サイズの妥当性は文書意図依存のため目視確認です。",
+
+        "表が過度に縮小されていないか確認。",
+
+    )
+
+    add_result(
+
+        results,
+
+        file_path,
+
+        "PDF",
+
+        "C5.4",
+
+        "PDFページ番号正当性",
+
+        "MANUAL",
+
+        "ページ番号表示と総ページ整合は目視確認です。",
+
+        "ページ番号の欠番・重複を確認。",
+
+    )
+
+ 
+
+    reader_stream = getattr(reader, "stream", None)
+
+    if reader_stream is not None:
+
+        try:
+
+            reader_stream.close()
+
+        except Exception:
+
+            pass
+
 
 
 def check_file(file_path: Path, results: List[CheckResult], cover_keyword: Optional[str]) -> None:
@@ -3297,8 +4192,7 @@ def check_file(file_path: Path, results: List[CheckResult], cover_keyword: Optio
         file_type = "LegacyOffice"
         add_result(results, file_path, "LegacyOffice", "L1", "旧形式ファイル", "WARN", "旧形式(.xls/.doc)は詳細解析対象外。 / 指摘対象ページ：変換後に確認", "可能なら .xlsx/.docx へ変換。")
 
-    if file_type:
-        ensure_expected_checks(results, file_path, file_type)
+    # V5基準: 実際にチェックした結果のみ出力する。未対応/N/Aの補完は行わない。
 
 
 def find_target_files(root: Path, exclude_paths: Optional[Set[Path]] = None) -> List[Path]:
@@ -3411,96 +4305,7 @@ def extract_file_text_and_meta(file_path: Path) -> Tuple[str, Set[str], Set[str]
     return merged, annex_nums, wbs_nums
 
 
-def run_cross_file_consistency_checks(target_files: List[Path], results: List[CheckResult]) -> None:
-    file_info: Dict[str, Dict[str, object]] = {}
-    for fp in target_files:
-        text, annex_nums, wbs_nums = extract_file_text_and_meta(fp)
-        file_info[str(fp)] = {
-            "text": text,
-            "annex_nums": annex_nums,
-            "wbs_nums": wbs_nums,
-            "domains": detect_domains(fp),
-            "name": fp.name,
-        }
 
-    main_papers = [Path(p) for p, info in file_info.items() if "進捗報告資料（本紙）" in info["domains"]]
-    annex_files = [Path(p) for p, info in file_info.items() if info["annex_nums"]]
-    evm_files = [Path(p) for p, info in file_info.items() if "EVM" in info["domains"] or "本紙/EVM" in info["domains"]]
-
-    for main_fp in main_papers:
-        main_info = file_info[str(main_fp)]
-        main_annex = set(main_info["annex_nums"])
-        annex_body_union: Set[str] = set()
-        annex_name_union: Set[str] = set()
-        for af in annex_files:
-            info = file_info[str(af)]
-            body_nums = set(info["annex_nums"])
-            name_nums = parse_annex_numbers(af.stem)
-            annex_body_union |= body_nums
-            annex_name_union |= name_nums
-        missing_in_files = sorted(main_annex - annex_name_union, key=lambda x: int(x))
-        missing_in_body = sorted(main_annex - annex_body_union, key=lambda x: int(x))
-        extra_files = sorted(annex_name_union - main_annex, key=lambda x: int(x))
-        extra_body = sorted(annex_body_union - annex_name_union, key=lambda x: int(x))
-
-        status = "PASS"
-        details = []
-        if missing_in_files:
-            status = "FAIL"
-            details.append(f"本紙→別紙ファイル不足={missing_in_files[:10]}")
-        if missing_in_body:
-            status = "FAIL"
-            details.append(f"本紙→別紙本文不足={missing_in_body[:10]}")
-        if extra_files:
-            status = "WARN" if status == "PASS" else status
-            details.append(f"本紙未記載の別紙ファイル={extra_files[:10]}")
-        if extra_body:
-            status = "WARN" if status == "PASS" else status
-            details.append(f"ファイル名と本文の別紙番号不一致候補={extra_body[:10]}")
-        maybe_add_or_replace_result(
-            results, main_fp, "G02", "Excel" if main_fp.suffix.lower() in {'.xlsx', '.xlsm', '.xls'} else ("Word" if main_fp.suffix.lower() in {'.doc', '.docx'} else "PDF"),
-            "共通: 本紙（進捗状況報告）に記載されている別紙番号が、対応する別紙ファイル名と別紙内の本文に記載された番号と完全に一致しているか確認する。",
-            status,
-            (" / ".join(details) if details else "本紙・別紙ファイル名・別紙本文の別紙番号は整合しています。"),
-            "不足または不一致の別紙番号を修正してください。" if status in {"FAIL", "WARN"} else "対応不要。"
-        )
-
-    for af in annex_files:
-        info = file_info[str(af)]
-        body_nums = set(info["annex_nums"])
-        name_nums = parse_annex_numbers(af.stem)
-        status = "PASS" if body_nums == name_nums else ("FAIL" if name_nums or body_nums else "WARN")
-        maybe_add_or_replace_result(
-            results, af, "G03", "Excel" if af.suffix.lower() in {'.xlsx', '.xlsm', '.xls'} else ("Word" if af.suffix.lower() in {'.doc', '.docx'} else "PDF"),
-            "共通: 別紙ファイルのファイル名に記載されている別紙番号と別紙内の本文に記載されている別紙番号が一致しているか確認する。文法や表現を統一する。",
-            status,
-            (f"ファイル名={sorted(name_nums)} / 本文={sorted(body_nums)}" if (name_nums or body_nums) else "別紙番号を抽出できませんでした。"),
-            "ファイル名と本文の別紙番号を一致させてください。" if status != "PASS" else "対応不要。"
-        )
-
-    evm_wbs_union: Set[str] = set()
-    for ef in evm_files:
-        evm_wbs_union |= set(file_info[str(ef)]["wbs_nums"])
-
-    for main_fp in main_papers:
-        main_wbs = set(file_info[str(main_fp)]["wbs_nums"])
-        miss = sorted(main_wbs - evm_wbs_union)
-        extra = sorted(evm_wbs_union - main_wbs)
-        status = "PASS"
-        details = []
-        if miss:
-            status = "FAIL"
-            details.append(f"本紙にありEVMになし={miss[:12]}")
-        if extra:
-            status = "WARN" if status == "PASS" else status
-            details.append(f"EVMにあり本紙になし={extra[:12]}")
-        maybe_add_or_replace_result(
-            results, main_fp, "G04", "Excel" if main_fp.suffix.lower() in {'.xlsx', '.xlsm', '.xls'} else ("Word" if main_fp.suffix.lower() in {'.doc', '.docx'} else "PDF"),
-            "共通: 本紙（進捗状況報告）に記載されたWBS番号がEVMファイル内のタスク状態（開始、進行中、完了）と一致しており、不整合や漏れがないか確認する。",
-            status,
-            (" / ".join(details) if details else "本紙とEVMのWBS番号集合に明確な不整合は検出されません。"),
-            "本紙とEVMのWBS番号対応を見直してください。" if status in {"FAIL", "WARN"} else "対応不要。"
-        )
 
 
 def main(
@@ -3643,12 +4448,6 @@ def main(
                 processing_files = 0
                 report_progress("processed", current_file=str(file_path), file_index=idx, file_elapsed_sec=elapsed)
                 print(f"[{idx}/{total_files}] 完了: {display_file_path_for_log(file_path)} ({elapsed:.2f}秒)")
-
-        if not cancelled:
-            try:
-                run_cross_file_consistency_checks(target_files, results)
-            except Exception as exc:
-                add_result(results, root, "System", "S2", "ファイル横断整合チェック", "WARN", f"横断チェックで一部失敗: {exc}", "対象ファイルの構成と本文抽出結果を確認してください。")
 
 
     # 必ず統合ファイルのみ出力。分割ファイルは出力しない。
