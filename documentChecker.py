@@ -1205,9 +1205,9 @@ def run_visual_pipeline(
 
     # PPT/PPTX画像化処理（PowerPoint COM経由で高精度PNG化）
     if suffix in {".ppt", ".pptx"}:
-        # PPT/PPTX: ファイル名・拡張子をimage_previewとresultsで統一（.pptに）
+        # PPT/PPTX: 元ファイルの拡張子を保持してresults/image_previewへ出力する
         base_name = file_path.stem
-        unified_file_path = str(file_path.with_suffix('.ppt'))
+        unified_file_path = str(file_path)
         pdf_path = pdf_dir / f"{slug}.pdf"
         try:
             import pythoncom
@@ -1461,19 +1461,8 @@ def display_status(status: str) -> str:
     return "要チェック"
 
 def display_file_path_for_log(file_path: str) -> str:
-    """
-    ログや進捗表示用にPPT/PPTX/VSD/VSDXの拡張子を統一して表示
-    """
-    p = Path(file_path)
-    ext = p.suffix.lower()
-    if ext in {'.ppt', '.pptx'}:
-        return str(p.with_suffix('.ppt').name)
-    elif ext in {'.vsd', '.vsdx'}:
-        return str(p.with_suffix('.vsd').name)
-    else:
-        return p.name
-
-
+    """ログや進捗表示用に元ファイル名をそのまま表示する。"""
+    return Path(file_path).name
 def populate_image_preview_sheet(ws_images, visual_pages: Iterable[VisualPage], preview_pages_per_row: int = 6) -> None:
 
     ws_images.append(["file_name", "page_count", "image_labels..."])
@@ -1627,15 +1616,8 @@ def write_results_report_xlsx(results: Iterable[CheckResult], output_xlsx: Path)
     ])
 
     for r in filtered_results:
-        # PPT/PPTX/VSD/VSDXは拡張子を統一して出力
-        p = Path(r.file_path)
-        ext = p.suffix.lower()
-        if ext in {'.ppt', '.pptx'}:
-            file_path_disp = str(p)
-        elif ext in {'.vsd', '.xvsd', '.vsdx'}:
-            file_path_disp = str(p)
-        else:
-            file_path_disp = r.file_path
+        # 元ファイルの拡張子を保持して出力する（pptx→ppt等の変換表示をしない）
+        file_path_disp = r.file_path
         ws_results.append([
             file_path_disp,
             r.file_type,
@@ -1783,15 +1765,8 @@ def write_visual_report_xlsx(
     ])
 
     for r in filtered_results:
-        # PPT/PPTX/VSD/VSDXは拡張子を統一して出力
-        p = Path(r.file_path)
-        ext = p.suffix.lower()
-        if ext in {'.ppt', '.pptx'}:
-            file_path_disp = str(p.with_suffix('.ppt'))
-        elif ext in {'.vsd', '.vsdx'}:
-            file_path_disp = str(p.with_suffix('.vsd'))
-        else:
-            file_path_disp = r.file_path
+        # 元ファイルの拡張子を保持して出力する（pptx→ppt等の変換表示をしない）
+        file_path_disp = r.file_path
         ws_results.append([
             file_path_disp,
             r.file_type,
@@ -3347,7 +3322,7 @@ def check_word(file_path: Path, results: List[CheckResult], cover_keyword: Optio
 
         (
 
-            f"変更履歴要素={revision_count}, trackRevisions={track_revisions_on}, 取り消し線Run={strike_count}, 二重取り消し線Run={double_strike_count}。 / 指摘対象ページ：特定不可(Wordレイアウト依存)"
+            f"変更履歴を検出。変更履歴要素={revision_count}, trackRevisions={track_revisions_on}, 取り消し線Run={strike_count}, 二重取り消し線Run={double_strike_count}。 / 指摘対象ページ：特定不可(Wordレイアウト依存)"
 
             if has_miekeshi
 
@@ -4434,3 +4409,4 @@ def main(
 
 if __name__ == "__main__":
     main()
+
