@@ -1,4 +1,3 @@
-# from __future__ import annotations は必ずファイルの最上部に1回だけ記載
 from __future__ import annotations
 
 import argparse
@@ -407,6 +406,25 @@ def rewrite_output_xlsx(
                         elif value.startswith(staged_prefix):
                             cell.value = original_prefix + value[len(staged_prefix):]
                             replaced_cells += 1
+
+        # 1.5) image_preview等にファイル名だけで出たPDFプロキシ名を元Visio名へ戻す
+        #      例: BBBB.pdf -> BBBB.vsd / BBBB.vsdx
+        proxy_basename_map = {}
+        for staged_proxy, meta in proxy_map.items():
+            try:
+                proxy_basename_map[Path(staged_proxy).name] = Path(meta["original_path"]).name
+            except Exception:
+                pass
+        if proxy_basename_map:
+            for ws in wb.worksheets:
+                for row in ws.iter_rows():
+                    for cell in row:
+                        value = cell.value
+                        if isinstance(value, str) and value in proxy_basename_map:
+                            new_value = proxy_basename_map[value]
+                            if value != new_value:
+                                cell.value = new_value
+                                replaced_cells += 1
 
         # 2) file_path / file_type 列をヘッダ名ベースで補正（VisioプロキシPDF → 元VSD/VSDX）
         for ws in wb.worksheets:
