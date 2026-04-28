@@ -1522,11 +1522,17 @@ def populate_image_preview_sheet(ws_images, visual_pages: Iterable[VisualPage], 
         p = Path(file_path)
         ext = p.suffix.lower()
         if ext in {'.ppt', '.pptx'}:
-            display_name = p.with_suffix('.ppt').name
-        elif ext in {'.vsd', '.vsdx'}:
-            display_name = p.with_suffix('.vsd').name
-        elif ext == '.pdf' and p.with_suffix('.vsd').name in vsd_names:
-            display_name = p.with_suffix('.vsd').name
+            display_name = p.name
+        elif ext in {'.vsd', '.xvsd', '.vsdx'}:
+            display_name = p.name
+        elif ext == '.pdf' and any(p.with_suffix(e).name in vsd_names for e in ['.vsd', '.xvsd']):
+            # PDFでvsd/xvsd名が存在する場合はそちらに合わせる
+            for e in ['.vsd', '.xvsd']:
+                if p.with_suffix(e).name in vsd_names:
+                    display_name = p.with_suffix(e).name
+                    break
+            else:
+                display_name = p.name
         else:
             display_name = p.name
 
@@ -1625,9 +1631,9 @@ def write_results_report_xlsx(results: Iterable[CheckResult], output_xlsx: Path)
         p = Path(r.file_path)
         ext = p.suffix.lower()
         if ext in {'.ppt', '.pptx'}:
-            file_path_disp = str(p.with_suffix('.ppt'))
-        elif ext in {'.vsd', '.vsdx'}:
-            file_path_disp = str(p.with_suffix('.vsd'))
+            file_path_disp = str(p)
+        elif ext in {'.vsd', '.xvsd', '.vsdx'}:
+            file_path_disp = str(p)
         else:
             file_path_disp = r.file_path
         ws_results.append([
